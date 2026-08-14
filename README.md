@@ -1,76 +1,102 @@
 # Transformer Split-LBI Test-Time Adaptation
 
-这个仓库研究通过 Split-LBI 为 test-time adaptation（TTA）发现稀疏更新 support。旧论文以 SHOT 为目标函数，在 ResNet 的 256-d bottleneck FC 上做逐元素更新；仓库的 legacy model factory 还额外支持 VGG。当前开发目标是在 ImageNet-1K 预训练的 non-distilled DeiT-Small/16-224 上实现结构化 Transformer 更新。
+This repository studies sparse update-support discovery for test-time adaptation (TTA) with Split-LBI. The legacy paper applies a SHOT objective and element-wise sparse updates to the 256-dimensional bottleneck fully connected layer of ResNet models. The legacy model factory also supports VGG. The current development goal is architecture-aware Transformer adaptation with a non-distilled, ImageNet-1K-pretrained DeiT-Small/16-224 backbone.
 
-## 先读什么
+## Read First
 
-- [`AGENTS.md`](AGENTS.md)：完整项目现状、实现边界、服务器约束、实验协议和待裁决问题。Codex 会从根目录自动读取这个文件。
-- [`TRANSFORMER_GROUP_SPLIT_LBI_PROPOSAL_DOLLAR_MATH.md`](TRANSFORMER_GROUP_SPLIT_LBI_PROPOSAL_DOLLAR_MATH.md)：Transformer QK/VO/FFN 分组和实验设计。
-- [`catalog.md`](catalog.md)：服务器上的代码、数据、模型、环境和缓存路径。
-- [`26445_Test_Time_Adaptation_via (1).pdf`](26445_Test_Time_Adaptation_via%20%281%29.pdf)：只做 bottleneck FC 稀疏更新的旧稿，作为历史依据。
+- [`AGENTS.md`](AGENTS.md): authoritative project context, current implementation status, engineering boundaries, server constraints, experiment protocol, and unresolved decisions. Codex reads this file automatically from the repository root.
+- [`TRANSFORMER_GROUP_SPLIT_LBI_PROPOSAL_DOLLAR_MATH.md`](TRANSFORMER_GROUP_SPLIT_LBI_PROPOSAL_DOLLAR_MATH.md): the proposed Transformer QK, VO, and FFN grouping design.
+- [`catalog.md`](catalog.md): server-side paths for the repository, datasets, checkpoints, environments, and caches.
+- [`26445_Test_Time_Adaptation_via (1).pdf`](26445_Test_Time_Adaptation_via%20%281%29.pdf): the legacy manuscript covering bottleneck-FC sparse adaptation.
 
-## 当前状态
+## Current Status
 
-| 模块 | 状态 |
+| Component | Status |
 | --- | --- |
-| ResNet/VGG + SHOT OTTA | 已实现 |
-| FC scalar Dense/Random/Magnitude/Saliency/Split-LBI | 已实现 |
-| ResNet Conv dense update | `full_dense` 间接包含 |
-| Conv filter/channel Group Split-LBI | 当前仓库未发现 |
-| DeiT-S backbone/source training | 未实现 |
-| Transformer paired QK/VO/FFN groups | 未实现 |
-| TTDA | 未实现 |
+| ResNet/VGG + SHOT OTTA | Implemented |
+| FC scalar Dense/Random/Magnitude/Saliency/Split-LBI | Implemented |
+| Dense ResNet convolution updates | Indirectly included in `full_dense` |
+| Conv filter/channel Group Split-LBI | Not found in this repository |
+| DeiT-S backbone and source training | Not implemented |
+| Transformer paired QK/VO/FFN groups | Not implemented |
+| TTDA | Not implemented |
 
-因此，本仓库是可复用的 FC-OTTA 工程骨架，不是已经完成的 FC + Conv + Transformer 框架。特别注意：当前 LBI Stage 2 从相应的当前模型加 dense local delta 初始化，最终更新不保证当前 mask 外 local delta 严格为零；Transformer proposal 的最终方程暗示 strict masked delta，但与现有 engine 不同，尚待裁决。OTTA 每批即使严格限制 K 个 groups，跨 stream 的累计 support 也可能大于 K。
+This repository is therefore a reusable FC-OTTA engineering foundation, not an already completed FC + Conv + Transformer framework.
 
-验证协议也尚未冻结：target labels 不能进入 adaptation，但现有分析脚本会按 target FO accuracy 选择候选。正式实验前必须决定使用独立验证依据、报告全部 budgets，还是明确披露 oracle-style selection。
+Two method-level decisions remain unresolved:
 
-## 目录
+1. The current LBI Stage 2 starts from the current model plus a dense local delta, so the final local update is not guaranteed to be zero outside the discovered mask. The proposal's final equation suggests a strict masked delta, but that differs from the existing engine. In OTTA, even a strict K-group update per batch can accumulate into a source-relative support larger than K over the full stream.
+2. Target labels must never enter adaptation. However, the existing analysis scripts rank candidates by target FO accuracy. Before formal experiments, the project must choose an independent validation rule, report every budget, or explicitly disclose oracle-style selection.
+
+## Repository Layout
 
 ```text
-train.py                 现有单次 SHOT-OTTA 入口
-shot_otta/               data/model/loss/trainer/artifact
-core/lbi/                现有逐元素 Split-LBI
-source_training/         SHOT 风格 ResNet/VGG source trainer
-visda_otta/              VisDA 指标与辅助逻辑
-configs/                 单次运行配置
-experiments/             实验矩阵
-tools/                   planner/launcher/status/summary
-tests/                   synthetic smoke 与工程测试
+train.py                 Legacy single-run SHOT-OTTA entry point
+shot_otta/               Data, models, losses, trainer, and artifacts
+core/lbi/                Existing element-wise Split-LBI implementation
+source_training/         SHOT-style ResNet/VGG source trainer
+visda_otta/              VisDA-C metrics and helper logic
+configs/                 Single-run configurations
+experiments/             Experiment matrices
+tools/                   Planner, launchers, status checks, and summaries
+scripts/                 Maintenance utilities
+tests/                   Synthetic smoke and engineering tests
 ```
 
-## 现有代码快速检查
+The reusable pieces include the SHOT objective, image-list data pipeline, artifact system, experiment planning and launch infrastructure, summaries, and the broad LBI stage lifecycle. Transformer work still requires a DeiT model adapter, source trainer, structural group registry, group proximal operator, matched group selectors, Transformer-aware experiment identity, and TTDA support.
 
-安装 `requirements.txt` 后，可以只解析配置而不访问数据：
+## Installation
+
+Create an isolated Python environment and install the declared dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+`requirements.txt` was audited against all Python files in this repository. It includes:
+
+- every third-party package imported by the current legacy code, tools, and tests;
+- `timm` and `safetensors`, which are required by the already selected local DeiT-S checkpoint stack.
+
+Versions are intentionally not pinned yet because the server's Python, CUDA, PyTorch, and torchvision compatibility set has not been frozen. Once the server environment is validated, record those versions and create a reproducible lock or environment snapshot.
+
+## Quick Checks
+
+Parse the legacy configuration without accessing datasets or checkpoints:
 
 ```bash
 python train.py --config configs/shot_otta.yaml --variant full_dense --dry-run
 ```
 
-当前测试应先强制走 CPU，因为 `tests/lbi_smoke_test.py` 的 fake fixture 在 CUDA 可见时存在 device mismatch：
+Run the current smoke suite on CPU. This is recommended because `tests/lbi_smoke_test.py` has a fake fixture that remains on CPU when CUDA is visible:
 
 ```bash
 CUDA_VISIBLE_DEVICES=-1 bash -c 'for f in tests/*_test.py; do python "$f" || exit 1; done'
 ```
 
-## 数据与 source model
+## Data and Source Models
 
-仓库不包含 Office-31、VisDA-C、image-list 或 source checkpoint。现有 loader 期望旧 SHOT 风格的 `office/*_list.txt`、`VISDA-C/*_list.txt`，而服务器原始图片采用 `catalog.md` 中的 `office31/`、`visda-c/` 目录；正式运行前需要生成并验证 list。
+The repository does not contain Office-31, VisDA-C, image-list files, or source checkpoints. The legacy loader expects SHOT-style `office/*_list.txt` and `VISDA-C/*_list.txt` files, while the server stores raw images under the `office31/` and `visda-c/` directories documented in `catalog.md`. Image lists must be generated and validated before training or adaptation.
 
-`catalog.md` 中的 `deit_small_patch16_224.fb_in1k/model.safetensors` 只是 ImageNet-1K 初始化。Office-31 仍需训练 Amazon/DSLR/Webcam 三个 source models，VisDA-C 仍需在 synthetic train 上训练一个 12-class source model。所有 selector 比较必须使用同一个、带 hash 的 W0。
+The catalogued `deit_small_patch16_224.fb_in1k/model.safetensors` file is only an ImageNet-1K initialization. It is not an Office-31 or VisDA-C source model. The project still needs:
 
-`source_training/image_source.py` 基于 SHOT source trainer，能生成 legacy `source_F.pt/source_B.pt/source_C.pt`，但只支持 ResNet/VGG，不能直接用于 DeiT。Transformer 的 source trainer 和 checkpoint schema 是第一阶段工作。
+- three 31-class Office-31 source models trained on Amazon, DSLR, and Webcam;
+- one 12-class VisDA-C source model trained on the synthetic `train` domain.
 
-## 服务器约束
+Every selector and budget compared under the same protocol must use the same hashed source model, `W0`.
 
-服务器有 8 张 RTX 3090 24GB，主盘空间不足。代码、数据、模型、环境、cache 和临时文件必须留在：
+`source_training/image_source.py` is derived from the SHOT source trainer and writes legacy `source_F.pt`, `source_B.pt`, and `source_C.pt` checkpoints. It currently supports only ResNet and VGG. A DeiT source trainer and a versioned Transformer checkpoint schema are first-stage implementation tasks.
+
+## Server Constraints
+
+The experiment server has eight RTX 3090 GPUs with 24 GB of memory each, but its primary disk is full. Code, data, checkpoints, environments, caches, temporary files, and experiment outputs must remain under:
 
 ```text
 /home/nas3/biod/wangkangyi/
 ```
 
-精确路径见 `catalog.md`。模型加载不得隐式联网；`HF_HOME`、`TORCH_HOME`、`PIP_CACHE_DIR`、`CONDA_PKGS_DIRS`、`TMPDIR` 等必须显式指向该根目录。当前 catalog 未定义正式结果目录，大规模实验前需先确认并冻结 output root。
+See `catalog.md` for the exact known paths. Model construction must not trigger implicit downloads. Set `HF_HOME`, `TORCH_HOME`, `PIP_CACHE_DIR`, `CONDA_PKGS_DIRS`, and `TMPDIR` to locations under the approved root. The formal output directory has not yet been defined and must be confirmed before large experiment launches.
 
-## 依赖规则
+## Dependency Policy
 
-任何新增 Python import 都必须在同一变更中写入 `requirements.txt`。计划中的 timm 本地加载路线需要 `timm` 和 `safetensors`；在代码真正引入它们时，同步加入并锁定与服务器 PyTorch/CUDA 兼容的版本。
+Every new third-party Python import must be added to `requirements.txt` in the same change. Do not rely on ad hoc packages installed only in the server environment. Transitive dependencies are resolved by pip and should be pinned through the future validated environment lock rather than manually copied into the direct dependency list.
