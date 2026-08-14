@@ -1,0 +1,1 @@
+"""Method-independent optimization components."""
