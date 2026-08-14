@@ -1,0 +1,22 @@
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments and transient files
+.venv/
+venv/
+.env
+tmp/
+.cache/
+
+# Runtime artifacts and externally supplied assets
+runs/
+outputs/
+datasets/
+checkpoints/
+AGENTS.md
