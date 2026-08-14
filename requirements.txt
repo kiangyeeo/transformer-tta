@@ -1,3 +1,4 @@
+# Direct dependencies used by the current code, tools, and tests.
 numpy
 Pillow
 PyYAML
@@ -6,3 +7,7 @@ scipy
 torch
 torchvision
 tqdm
+
+# Declared Transformer stack for the selected local DeiT-S checkpoint.
+timm
+safetensors
