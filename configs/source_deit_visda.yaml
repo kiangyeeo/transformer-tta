@@ -1,0 +1,69 @@
+# Frozen source-training v1 for VisDA-C synthetic train -> real validation.
+# Only the synthetic train list is accepted by this trainer; target validation
+# labels cannot enter fitting or source-checkpoint selection.
+schema_version: 1
+
+data:
+  dataset: visda-c
+  source_domain: train
+  num_classes: 12
+  source_list: /home/nas3/biod/wangkangyi/datasets/image_lists/visda-c/train_list.txt
+  class_mapping_path: /home/nas3/biod/wangkangyi/datasets/image_lists/visda-c/class_to_idx.json
+  split:
+    strategy: stratified_fixed
+    validation_fraction: 0.1
+    seed: 2020
+
+model:
+  name: deit_small_patch16_224.fb_in1k
+  hidden_dim: 384
+  head: linear
+  pretrained_num_classes: 1000
+  pretrained_path: /home/nas3/biod/wangkangyi/checkpoints/deit_small_patch16_224.fb_in1k/model.safetensors
+  pretrained_config_path: /home/nas3/biod/wangkangyi/checkpoints/deit_small_patch16_224.fb_in1k/config.json
+  head_init_std: 0.02
+  drop_rate: 0.0
+  drop_path_rate: 0.0
+
+preprocessing:
+  resize_size: 256
+  crop_size: 224
+  interpolation: bicubic
+  horizontal_flip_probability: 0.5
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  strong_augmentation: disabled
+
+training:
+  finetune_scope: full_model
+  epochs: 10
+  batch_size: 64
+  workers: 8
+  seed: 2020
+  label_smoothing: 0.1
+  amp: true
+  gradient_clipping: null
+  model_ema: false
+  optimizer:
+    name: adamw
+    backbone_lr: 0.0000625
+    head_lr: 0.000625
+    weight_decay: 0.05
+    betas: [0.9, 0.999]
+    eps: 0.00000001
+    no_decay_policy: bias_norm_and_tokens
+  scheduler:
+    name: cosine
+    # One epoch is the smallest unambiguous warmup for a ten-epoch recipe.
+    warmup_epochs: 1
+    min_lr: 0.000001
+
+checkpoint:
+  output_path: /home/nas3/biod/wangkangyi/checkpoints/source_models/visda-c/train.pth
+  selection_metric: macro_class_accuracy
+  save_last_each_epoch: true
+
+runtime:
+  device: cuda
+  deterministic: true
+  pin_memory: true
