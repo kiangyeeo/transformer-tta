@@ -6,6 +6,7 @@ This repository studies sparse update-support discovery for test-time adaptation
 
 - [`AGENTS.md`](AGENTS.md): authoritative project context, current implementation status, engineering boundaries, server constraints, experiment protocol, and unresolved decisions. Codex reads this file automatically from the repository root.
 - [`TRANSFORMER_GROUP_SPLIT_LBI_PROPOSAL_DOLLAR_MATH.md`](TRANSFORMER_GROUP_SPLIT_LBI_PROPOSAL_DOLLAR_MATH.md): the proposed Transformer QK, VO, and FFN grouping design.
+- [`SOURCE_TRAINING_DEIT_PROTOCOL.md`](SOURCE_TRAINING_DEIT_PROTOCOL.md): the frozen DeiT source-model architecture, parameters, validation isolation, checkpoint schema, and server commands.
 - [`catalog.md`](catalog.md): server-side paths for the repository, datasets, checkpoints, environments, and caches.
 - [`26445_Test_Time_Adaptation_via (1).pdf`](26445_Test_Time_Adaptation_via%20%281%29.pdf): the legacy manuscript covering bottleneck-FC sparse adaptation.
 
@@ -17,7 +18,8 @@ This repository studies sparse update-support discovery for test-time adaptation
 | FC scalar Dense/Random/Magnitude/Saliency/Split-LBI | Implemented |
 | Dense ResNet convolution updates | Indirectly included in `full_dense` |
 | Conv filter/channel Group Split-LBI | Not found in this repository |
-| DeiT-S backbone and source training | Not implemented |
+| DeiT-S source training | Implemented for Office-31 and VisDA-C; server checkpoints not yet trained |
+| DeiT-S TTA backbone integration | Not implemented |
 | Transformer paired QK/VO/FFN groups | Not implemented |
 | TTDA | Not implemented |
 
@@ -34,7 +36,7 @@ Two method-level decisions remain unresolved:
 train.py                 Legacy single-run SHOT-OTTA entry point
 shot_otta/               Data, models, losses, trainer, and artifacts
 core/lbi/                Existing element-wise Split-LBI implementation
-source_training/         SHOT-style ResNet/VGG source trainer
+source_training/         Legacy SHOT plus local-only DeiT source training
 visda_otta/              VisDA-C metrics and helper logic
 configs/                 Single-run configurations
 experiments/             Experiment matrices
@@ -43,7 +45,7 @@ scripts/                 Maintenance utilities
 tests/                   Synthetic smoke and engineering tests
 ```
 
-The reusable pieces include the SHOT objective, image-list data pipeline, artifact system, experiment planning and launch infrastructure, summaries, and the broad LBI stage lifecycle. Transformer work still requires a DeiT model adapter, source trainer, structural group registry, group proximal operator, matched group selectors, Transformer-aware experiment identity, and TTDA support.
+The reusable pieces include the SHOT objective, image-list data pipeline, artifact system, experiment planning and launch infrastructure, summaries, and the broad LBI stage lifecycle. Transformer work still requires the TTA-side DeiT model adapter, structural group registry, group proximal operator, matched group selectors, Transformer-aware experiment identity, and TTDA support. The local-only DeiT source trainer and its checkpoint loader are now implemented independently of the legacy FC path.
 
 ## Installation
 
@@ -85,7 +87,33 @@ The catalogued `deit_small_patch16_224.fb_in1k/model.safetensors` file is only a
 
 Every selector and budget compared under the same protocol must use the same hashed source model, `W0`.
 
-`source_training/image_source.py` is derived from the SHOT source trainer and writes legacy `source_F.pt`, `source_B.pt`, and `source_C.pt` checkpoints. It currently supports only ResNet and VGG. A DeiT source trainer and a versioned Transformer checkpoint schema are first-stage implementation tasks.
+`source_training/image_source.py` remains the legacy SHOT ResNet/VGG trainer and writes `source_F.pt`, `source_B.pt`, and `source_C.pt`. Transformer source models use [`train_source_deit.py`](train_source_deit.py), a direct `Linear(384, 31/12)` classifier, and the catalogued single-file `.pth` schema. The model is fully fine-tuned on source data; head-only training is deliberately rejected as a different linear-probe experiment.
+
+The frozen parameters, rationale, data-isolation rule, checkpoint schema, and server commands are documented in [`SOURCE_TRAINING_DEIT_PROTOCOL.md`](SOURCE_TRAINING_DEIT_PROTOCOL.md). The two dataset configurations are:
+
+- [`configs/source_deit_office31.yaml`](configs/source_deit_office31.yaml), reused with `--source-domain amazon|dslr|webcam`;
+- [`configs/source_deit_visda.yaml`](configs/source_deit_visda.yaml), fixed to the synthetic `train` source.
+
+Build deterministic absolute-path image lists before training:
+
+```bash
+python tools/build_image_lists.py --dataset office31 \
+  --dataset-root /home/nas3/biod/wangkangyi/datasets/office31 \
+  --output-root /home/nas3/biod/wangkangyi/datasets/image_lists/office31
+
+python tools/build_image_lists.py --dataset visda-c \
+  --dataset-root /home/nas3/biod/wangkangyi/datasets/visda-c \
+  --output-root /home/nas3/biod/wangkangyi/datasets/image_lists/visda-c
+```
+
+Then validate the four source runs before launching them:
+
+```bash
+python train_source_deit.py --config configs/source_deit_office31.yaml --source-domain amazon --dry-run
+python train_source_deit.py --config configs/source_deit_office31.yaml --source-domain dslr --dry-run
+python train_source_deit.py --config configs/source_deit_office31.yaml --source-domain webcam --dry-run
+python train_source_deit.py --config configs/source_deit_visda.yaml --dry-run
+```
 
 ## Server Constraints
 
