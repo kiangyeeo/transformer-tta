@@ -404,10 +404,27 @@ def _run_single_mask(
                 "group-random OTTA stream did not modify model state"
             )
         delta_stats = _delta_stats(model, initial_state)
-        if delta_stats["delta_nonzero_scalars"] != active_scalars:
+        # strict_masked_delta only requires masked-OUT positions to stay at
+        # W0.  Active positions may legitimately end with zero change (e.g.
+        # when their gradient is exactly zero over the stream), so the set of
+        # changed scalars is a subset of the active set.
+        masked_out_changed = 0
+        for name, mask in masks.items():
+            parameter = named_parameters[name]
+            difference = parameter.detach() - initial_state[name].to(
+                parameter.device
+            )
+            changed = difference != 0
+            masked_out_changed += int(changed[~mask].sum().item())
+        if masked_out_changed != 0:
+            raise RuntimeError(
+                "strict_masked_delta violated: "
+                f"{masked_out_changed} masked-out scalars changed"
+            )
+        if delta_stats["delta_nonzero_scalars"] > active_scalars:
             raise RuntimeError(
                 "strict_masked_delta violated: nonzero delta scalars "
-                f"{delta_stats['delta_nonzero_scalars']} != active scalars "
+                f"{delta_stats['delta_nonzero_scalars']} > active scalars "
                 f"{active_scalars}"
             )
 

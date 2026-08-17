@@ -44,6 +44,27 @@ def config_output_root():
     return Path(root).resolve()
 
 
+def load_failed_jobs(summary_path):
+    """Load the failed jobs recorded in a previous launcher summary."""
+    if not summary_path.is_file():
+        raise SystemExit(f"no launcher summary to resume from: {summary_path}")
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    failed = []
+    for result in summary.get("results", []):
+        if result.get("return_code") != 0:
+            failed.append(
+                {
+                    "budget": result["budget"],
+                    "dataset": result["dataset"],
+                    "source": int(result["source"]),
+                    "target": int(result["target"]),
+                }
+            )
+    if not failed:
+        raise SystemExit("no failed jobs to resume")
+    return failed
+
+
 def build_jobs(budgets, datasets):
     jobs = []
     for budget in budgets:
@@ -96,6 +117,11 @@ def build_parser():
     parser.add_argument("--source-checkpoint-root")
     parser.add_argument("--output-root")
     parser.add_argument(
+        "--resume-failed",
+        action="store_true",
+        help="Re-run only the jobs that failed in a previous launcher summary.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the job->GPU assignment without launching anything.",
@@ -105,21 +131,9 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
-    budgets = [
-        float(value.strip()) for value in args.budgets.split(",") if value.strip()
-    ]
-    if not budgets:
-        raise SystemExit("no budgets selected")
     gpus = [int(value) for value in args.gpus.split(",") if value.strip()]
     if not gpus:
         raise SystemExit("no GPUs selected")
-    datasets = [
-        value.strip() for value in args.datasets.split(",") if value.strip()
-    ]
-    jobs = build_jobs(budgets, datasets)
-    total_jobs = len(jobs)
-    if total_jobs == 0:
-        raise SystemExit("no jobs to run")
 
     output_root = (
         Path(args.output_root).resolve()
@@ -128,9 +142,36 @@ def main():
     )
     log_dir = output_root / "launcher_logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    resume = bool(args.resume_failed)
+    log_prefix = "retry_" if resume else ""
+    summary_filename = (
+        "launcher_summary_retry.json" if resume else "launcher_summary.json"
+    )
+
+    if resume:
+        jobs = load_failed_jobs(log_dir / "launcher_summary.json")
+        budgets = sorted({job["budget"] for job in jobs})
+    else:
+        budgets = [
+            float(value.strip())
+            for value in args.budgets.split(",")
+            if value.strip()
+        ]
+        if not budgets:
+            raise SystemExit("no budgets selected")
+        datasets = [
+            value.strip()
+            for value in args.datasets.split(",")
+            if value.strip()
+        ]
+        jobs = build_jobs(budgets, datasets)
+    total_jobs = len(jobs)
+    if total_jobs == 0:
+        raise SystemExit("no jobs to run")
+
     print(
         f"jobs={total_jobs} gpus={gpus} budgets={budgets} "
-        f"datasets={datasets} log_dir={log_dir}",
+        f"resume={resume} log_dir={log_dir}",
         flush=True,
     )
 
@@ -179,7 +220,7 @@ def main():
             task_name = f"{job['dataset']}_s{job['source']}_t{job['target']}"
             log_path = (
                 log_dir
-                / f"budget_{job['budget']}_{task_name}_gpu{gpu}.log"
+                / f"{log_prefix}budget_{job['budget']}_{task_name}_gpu{gpu}.log"
             )
             command = (
                 base_command
@@ -231,7 +272,7 @@ def main():
         "failed": sum(1 for result in results if result["return_code"] != 0),
         "results": results,
     }
-    summary_path = log_dir / "launcher_summary.json"
+    summary_path = log_dir / summary_filename
     summary_path.write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
     )
