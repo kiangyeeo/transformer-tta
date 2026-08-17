@@ -113,7 +113,10 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
             if not torch.cuda.is_available():
                 raise RuntimeError("CUDA evaluation requested but CUDA is unavailable")
             device = torch.device("cuda:0")
-            torch.cuda.reset_peak_memory_stats(device)
+            # torch 2.4.1 raises "Invalid device argument" when an explicit
+            # device index is passed before the CUDA caching allocator has been
+            # initialized. Reset the current device's stats instead.
+            torch.cuda.reset_peak_memory_stats()
         else:
             device = torch.device("cpu")
         amp_effective = bool(config["evaluation"]["amp"] and device.type == "cuda")
