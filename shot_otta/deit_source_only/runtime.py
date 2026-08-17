@@ -4,6 +4,7 @@ import hashlib
 import importlib.metadata
 import platform
 import random
+import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 
@@ -138,10 +139,19 @@ def build_target_loader(config):
     return records, loader
 
 
-def evaluate_model(model, loader, device, *, amp, on_batch=None):
-    """Evaluate one complete loader pass and retain exact sample indices."""
+def evaluate_model(model, loader, device, *, amp, on_batch=None, progress_label=None):
+    """Evaluate one complete loader pass and retain exact sample indices.
+
+    When ``progress_label`` is provided, a short flush-buffered progress line
+    is printed roughly every 10% of the loader so long runs are observable
+    through the launcher's redirected ``stdout.log``.
+    """
     all_labels, all_predictions, all_indices = [], [], []
     model.eval()
+    total_batches = len(loader)
+    progress_every = max(1, total_batches // 10)
+    started = time.perf_counter()
+    samples_seen = 0
     with torch.inference_mode():
         for batch_index, (images, labels, indices) in enumerate(loader, start=1):
             images = images.to(device, non_blocking=True)
@@ -153,8 +163,28 @@ def evaluate_model(model, loader, device, *, amp, on_batch=None):
             all_predictions.append(predictions)
             all_labels.append(labels)
             all_indices.append(indices)
+            samples_seen += int(labels.numel())
             if on_batch is not None:
                 on_batch(batch_index, labels, predictions, indices)
+            if (
+                progress_label is not None
+                and (
+                    batch_index % progress_every == 0
+                    or batch_index == total_batches
+                )
+            ):
+                elapsed = time.perf_counter() - started
+                peak_mib = (
+                    int(torch.cuda.max_memory_allocated(device)) / 1048576.0
+                    if device.type == "cuda"
+                    else 0.0
+                )
+                print(
+                    f"[{progress_label}] batch {batch_index}/{total_batches} "
+                    f"samples {samples_seen} elapsed {elapsed:.1f}s "
+                    f"peak_gpu {peak_mib:.0f} MiB",
+                    flush=True,
+                )
     if not all_predictions:
         raise RuntimeError("Target loader produced no batches")
     return (

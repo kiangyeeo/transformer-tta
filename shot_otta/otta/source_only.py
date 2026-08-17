@@ -123,12 +123,21 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
         set_reproducibility(
             config["seed"], config["evaluation"]["deterministic"]
         )
+        print(
+            "[otta] loading source checkpoint: "
+            f"{config['source_checkpoint']['path']}",
+            flush=True,
+        )
         model, checkpoint_metadata = load_frozen_deit_source(
             config,
             device,
             model_factory=model_factory,
         )
         state_before = hash_model_state(model)
+        print(
+            f"[otta] W0 loaded and frozen (state_sha256={state_before[:12]}...)",
+            flush=True,
+        )
 
         records, loader = build_target_loader(config)
 
@@ -174,6 +183,7 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
             device,
             amp=amp_effective,
             on_batch=record_batch,
+            progress_label="OTTA PU",
         )
         require_sequential_complete(
             pu_indices, len(records), protocol="OTTA PU stream"
@@ -192,6 +202,7 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
             loader,
             device,
             amp=amp_effective,
+            progress_label="OTTA FO",
         )
         require_sequential_complete(
             fo_indices, len(records), protocol="OTTA FO evaluation"

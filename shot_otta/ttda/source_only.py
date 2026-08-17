@@ -106,12 +106,21 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
         set_reproducibility(
             config["seed"], config["evaluation"]["deterministic"]
         )
+        print(
+            "[ttda] loading source checkpoint: "
+            f"{config['source_checkpoint']['path']}",
+            flush=True,
+        )
         model, checkpoint_metadata = load_frozen_deit_source(
             config,
             device,
             model_factory=model_factory,
         )
         state_before = hash_model_state(model)
+        print(
+            f"[ttda] W0 loaded and frozen (state_sha256={state_before[:12]}...)",
+            flush=True,
+        )
 
         records, loader = build_target_loader(config)
         labels, predictions, indices = evaluate_model(
@@ -119,6 +128,7 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
             loader,
             device,
             amp=amp_effective,
+            progress_label="TTDA",
         )
         require_sequential_complete(indices, len(records), protocol="TTDA")
         state_after = hash_model_state(model)
