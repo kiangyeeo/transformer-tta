@@ -1,8 +1,14 @@
 # DeiT-S Source-Training Protocol
 
+> Server status (2026-08-17): all three Office-31 source checkpoints and the
+> VisDA-C `train` source checkpoint are reported complete at the configured
+> output paths. This is a user-confirmed execution status, not a local audit of
+> the checkpoint files or their manifests. See `SERVER_STATE.md`.
+
 This document freezes source-training protocol v1 for the Transformer branch.
-It is a methodological contract, not a claim that the resulting checkpoints
-have already been trained or validated on the server.
+The protocol remains a methodological contract; the status note above records
+that its four training runs have completed, but does not by itself validate the
+resulting checkpoint bytes or metrics.
 
 ## Scope and isolation
 

@@ -19,5 +19,4 @@ runs/
 outputs/
 datasets/
 checkpoints/
-AGENTS.md
 deit_small_patch16_224.fb_in1k

@@ -18,7 +18,7 @@
 │   │   ├── model.safetensors        # ImageNet-1K pretrained DeiT-S
 │   │   └── config.json
 │   │
-│   └── source_models/               # 用 source domain 训练后的 W0
+│   └── source_models/               # 用 source domain 训练后的 W0；以下 4 个 .pth 已于 2026-08-17 由用户确认存在
 │       ├── office31/
 │       │   ├── amazon.pth
 │       │   ├── dslr.pth
@@ -36,3 +36,8 @@
 ├── conda-home/
 ├── tmp/
 └── miniconda3/
+
+状态说明：以上 4 个 source-model `.pth` 路径与训练配置中的
+`checkpoint.output_path` 一致。权重文件留在服务器，不复制进 Git；本地仓库尚未核验
+对应 manifest 中的 SHA-256、best epoch 和 source-validation 指标。动态状态详见
+`SERVER_STATE.md`。

@@ -7,6 +7,7 @@ This repository studies sparse update-support discovery for test-time adaptation
 - [`AGENTS.md`](AGENTS.md): authoritative project context, current implementation status, engineering boundaries, server constraints, experiment protocol, and unresolved decisions. Codex reads this file automatically from the repository root.
 - [`TRANSFORMER_GROUP_SPLIT_LBI_PROPOSAL_DOLLAR_MATH.md`](TRANSFORMER_GROUP_SPLIT_LBI_PROPOSAL_DOLLAR_MATH.md): the proposed Transformer QK, VO, and FFN grouping design.
 - [`SOURCE_TRAINING_DEIT_PROTOCOL.md`](SOURCE_TRAINING_DEIT_PROTOCOL.md): the frozen DeiT source-model architecture, parameters, validation isolation, checkpoint schema, and server commands.
+- [`SERVER_STATE.md`](SERVER_STATE.md): the latest recorded server-side datasets, source checkpoints, verification boundary, and next-step prerequisites.
 - [`catalog.md`](catalog.md): server-side paths for the repository, datasets, checkpoints, environments, and caches.
 - [`26445_Test_Time_Adaptation_via (1).pdf`](26445_Test_Time_Adaptation_via%20%281%29.pdf): the legacy manuscript covering bottleneck-FC sparse adaptation.
 
@@ -18,7 +19,7 @@ This repository studies sparse update-support discovery for test-time adaptation
 | FC scalar Dense/Random/Magnitude/Saliency/Split-LBI | Implemented |
 | Dense ResNet convolution updates | Indirectly included in `full_dense` |
 | Conv filter/channel Group Split-LBI | Not found in this repository |
-| DeiT-S source training | Implemented for Office-31 and VisDA-C; server checkpoints not yet trained |
+| DeiT-S source training | Implemented; all four server-side source checkpoints are reported complete |
 | DeiT-S TTA backbone integration | Not implemented |
 | Transformer paired QK/VO/FFN groups | Not implemented |
 | TTDA | Not implemented |
@@ -78,12 +79,16 @@ CUDA_VISIBLE_DEVICES=-1 bash -c 'for f in tests/*_test.py; do python "$f" || exi
 
 ## Data and Source Models
 
-The repository does not contain Office-31, VisDA-C, image-list files, or source checkpoints. The legacy loader expects SHOT-style `office/*_list.txt` and `VISDA-C/*_list.txt` files, while the server stores raw images under the `office31/` and `visda-c/` directories documented in `catalog.md`. Image lists must be generated and validated before training or adaptation.
+The repository does not contain Office-31, VisDA-C, image-list files, or source checkpoint binaries. Those assets remain on the experiment server under the paths documented in `catalog.md`. The legacy loader expects SHOT-style `office/*_list.txt` and `VISDA-C/*_list.txt` files; the newer DeiT source configurations use the server-side `image_lists/office31` and `image_lists/visda-c` paths.
 
-The catalogued `deit_small_patch16_224.fb_in1k/model.safetensors` file is only an ImageNet-1K initialization. It is not an Office-31 or VisDA-C source model. The project still needs:
+The catalogued `deit_small_patch16_224.fb_in1k/model.safetensors` file is only the ImageNet-1K initialization. The four task-specific DeiT-S source models have now been trained and are reported present at:
 
-- three 31-class Office-31 source models trained on Amazon, DSLR, and Webcam;
-- one 12-class VisDA-C source model trained on the synthetic `train` domain.
+- `/home/nas3/biod/wangkangyi/checkpoints/source_models/office31/amazon.pth`
+- `/home/nas3/biod/wangkangyi/checkpoints/source_models/office31/dslr.pth`
+- `/home/nas3/biod/wangkangyi/checkpoints/source_models/office31/webcam.pth`
+- `/home/nas3/biod/wangkangyi/checkpoints/source_models/visda-c/train.pth`
+
+This completion status is based on the user's server-side confirmation on 2026-08-17. The checkpoint files and adjacent manifests are not copied into this local repository, so their SHA-256 values, best epochs, validation metrics, and exact software versions are not locally audited yet. See [`SERVER_STATE.md`](SERVER_STATE.md) for the persistent verification boundary.
 
 Every selector and budget compared under the same protocol must use the same hashed source model, `W0`.
 
