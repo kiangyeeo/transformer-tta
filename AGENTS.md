@@ -39,9 +39,9 @@ W^{\mathrm{TTA}} = W_0 + \Delta W,
 | Conv dense update | 部分已有 | `full_dense` 更新 `netF + netB`，因此会更新 ResNet Conv；这不是 Conv group sparse update |
 | Conv filter/channel Group Split-LBI | 未发现 | 当前 Git 仅有 `master/origin/master`，仓库和历史中没有相应实现 |
 | DeiT source trainer | 已实现；4 个 W0 已在服务器产出 | `train_source_deit.py` 全量微调 non-distilled DeiT-S，直接 `Linear(384,31/12)` head；2026-08-17 用户确认 Office-31 三域和 VisDA-C train 的 `.pth` 均位于 catalog 约定路径，本地尚未核验 manifest/hash |
-| DeiT/Transformer TTA backbone | 部分已有 | 已有严格本地 W0 加载、TTDA source-only 直接评测、OTTA source-only 流式评测和 OTTA full-dense/candidate-dense 可训练 baseline；structural adaptation 尚未接入 |
-| Transformer structural groups | 未实现 | 没有 group registry、group prox、group mask/scatter |
-| OTTA | source-only、full-dense、candidate-dense 与 legacy FC 已实现 | `evaluate_deit_otta.py` 提供 DeiT 零适配流式 control；`evaluate_deit_otta_full_dense.py --variant {full_dense,candidate_dense}` 提供 SHOT objective + AdamW 的 dense update（full-dense 更新除 classifier/head 外的全部参数即 `all_except_head`，candidate-dense 仅最后 3 block 的 qkv/proj/fc1/fc2 weight，两者的 bias/LN/head 均冻结；均本地实现，服务器旧 full_dense 已按 head 冻结语义重跑待确认、candidate 已跑）；legacy ResNet/VGG 路径支持每 batch 适配。DeiT 可训练 sparse OTTA 尚未实现 |
+| DeiT/Transformer TTA backbone | 部分已有 | 已有严格本地 W0 加载、TTDA source-only 直接评测、OTTA source-only 流式评测、OTTA full-dense/candidate-dense 可训练 baseline 和 OTTA group_random 稀疏 baseline；Group Split-LBI / Magnitude / Saliency structural adaptation 尚未接入 |
+| Transformer structural groups | 部分已有 | `shot_otta/adaptation/deit_groups.py` 已实现 paired Q-K/V-O/FFN 的 group registry、随机 group selector 和 per-parameter mask/scatter；group prox / Group Split-LBI 尚未实现 |
+| OTTA | source-only、full-dense、candidate-dense、group_random 与 legacy FC 已实现 | `evaluate_deit_otta.py` 提供 DeiT 零适配流式 control；`evaluate_deit_otta_full_dense.py --variant {full_dense,candidate_dense}` 提供 SHOT objective + AdamW 的 dense update（full-dense 更新除 classifier/head 外的全部参数即 `all_except_head`，candidate-dense 仅最后 3 block 的 qkv/proj/fc1/fc2 weight，两者的 bias/LN/head 均冻结）；`evaluate_deit_otta_random_group.py` 提供 matched-budget 随机 structural-group 基线（`budget=active_groups/6912`，向上取整，static mask，`strict_masked_delta`，3-mask mean±std）；legacy ResNet/VGG 路径支持每 batch 适配。DeiT Magnitude/Saliency/Group Split-LBI OTTA 尚未实现 |
 | TTDA | 仅 source-only control | `evaluate_deit_ttda.py` 支持零适配的完整 target dataset 评测；任何 TTDA adaptation 生命周期仍未实现 |
 | TENT/EATA/CoTTA 等独立 TTA 方法 | 未实现 | 现有 baseline 是同一 SHOT objective 下的更新/选择 baseline |
 | Source-domain trainer | ResNet/VGG + DeiT 可用 | legacy SHOT 三文件路径保持不变；DeiT 使用新单文件 schema、source-only validation 与每 epoch resume state |
@@ -62,11 +62,14 @@ transformer-tta/
 ├── evaluate_deit_ttda.py        # DeiT TTDA source-only 零适配评测入口
 ├── evaluate_deit_otta.py        # DeiT OTTA source-only 顺序流评测入口
 ├── evaluate_deit_otta_full_dense.py  # DeiT OTTA full/candidate-dense 可训练评测入口
+├── evaluate_deit_otta_random_group.py  # DeiT OTTA random structural-group 可训练评测入口
 ├── train_source_deit.py         # DeiT-S source-domain 训练统一入口
 ├── experiment_identity.py       # legacy FC 与 DeiT TTDA/OTTA 实验身份
 ├── shot_otta/                   # 数据、模型、loss、trainer、artifact
 │   ├── deit_source_only/         # DeiT 零适配公共 config/runtime/CLI 基础设施
-│   ├── otta/                     # DeiT OTTA 协议生命周期（source-only + full-dense）
+│   ├── adaptation/               # DeiT structural group 定义与 mask/scatter
+│   │   └── deit_groups.py        # paired Q-K/V-O/FFN group registry + 随机 selector
+│   ├── otta/                     # DeiT OTTA 协议生命周期（source-only + full-dense + group_random）
 │   └── ttda/                     # DeiT TTDA 协议生命周期与兼容入口
 ├── core/lbi/                    # 逐元素 Split-LBI engine/state/diagnostics
 ├── source_training/             # SHOT 风格 ResNet/VGG source trainer
@@ -75,11 +78,11 @@ transformer-tta/
 │   ├── deit_model.py            # local-only safetensors 与单文件 W0 loader
 │   └── deit_trainer.py          # full-model fine-tune、resume、artifact
 ├── visda_otta/                  # VisDA 指标和适配辅助代码
-├── configs/                     # 单次运行配置（含 deit_otta_{full_dense,candidate_dense}.yaml）
+├── configs/                     # 单次运行配置（含 deit_otta_{full_dense,candidate_dense,group_random}.yaml）
 ├── experiments/                 # 实验矩阵
-├── tools/                       # planner、launcher、status、summary（含 run_deit_otta_multi_gpu.py 8 卡调度）
+├── tools/                       # planner、launcher、status、summary（含 run_deit_otta_multi_gpu.py 与 run_deit_otta_random_group_multi_gpu.py 8 卡调度）
 ├── scripts/                     # 维护脚本
-├── tests/                       # 合成 smoke/工程测试（含 full-dense CPU 契约）
+├── tests/                       # 合成 smoke/工程测试（含 full-dense 与 random-group CPU 契约）
 ├── TRANSFORMER_GROUP_SPLIT_LBI_PROPOSAL_DOLLAR_MATH.md
 ├── SOURCE_TRAINING_DEIT_PROTOCOL.md
 └── 26445_Test_Time_Adaptation_via (1).pdf
@@ -126,6 +129,8 @@ proposal 的最终方程暗示严格的 `W_new = W_base + delta_masked`。当前
 - 方案 B：采用 `strict_masked_delta`，每次 step 后恢复/投影当前 batch mask 外参数，最终只写回 active groups。
 
 无论选择哪一项，都要把 `delta_semantics` 写入 config、manifest、实验 identity 和汇总表。若选择方案 B，strict 约束只作用于当前 `delta_t`，不能抹掉先前 batch 已写入 `W_t` 的合法更新；即使每个 batch 恰好 K 个 groups，累计的 `W_T - W_source` 也可能覆盖远多于 K 个 groups。用户裁决前不要据此扩展两套 Transformer 主实验。
+
+`group_random` baseline 不属于上面的 LBI 两阶段歧义：Random selector 的语义是“随机选 K 个 groups、其余完全冻结”，因此其 `delta_semantics` 固定为 `strict_masked_delta`（每 step 后把 mask 外位置恢复到 W0，已写入 config/manifest/identity/summary）。Group Split-LBI 的 Stage-1/Stage-2 语义仍待用户裁决。
 
 ### 6.2 还未冻结的定义
 

@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""Dispatch DeiT OTTA random structural-group runs across GPUs.
+
+Greedy scheduler: at most one subprocess per GPU, refilling free GPUs as jobs
+finish.  The job set is ``budgets x directions`` where directions are the six
+Office-31 ordered transfers plus VisDA-C train->validation (seven total).
+Each job runs its three random masks sequentially inside one process, so the
+per-budget mean ± std stays in a single ``summary.json``.
+"""
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+ENTRYPOINT = PROJECT_ROOT / "evaluate_deit_otta_random_group.py"
+OFFICE_DIRECTIONS = ((0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1))
+VISDA_DIRECTION = ((0, 1),)
+DEFAULT_BUDGETS = ("0.005", "0.01", "0.02", "0.001", "0.003")
+POLL_SECONDS = 5.0
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def config_output_root():
+    config_path = PROJECT_ROOT / "configs" / "deit_otta_group_random.yaml"
+    with open(config_path, "r", encoding="utf-8") as file_obj:
+        config = yaml.safe_load(file_obj)
+    root = config.get("output", {}).get("root")
+    if not root:
+        raise RuntimeError(f"config has no output.root: {config_path}")
+    return Path(root).resolve()
+
+
+def build_jobs(budgets, datasets):
+    jobs = []
+    for budget in budgets:
+        if "office31" in datasets:
+            for source, target in OFFICE_DIRECTIONS:
+                jobs.append(
+                    {
+                        "budget": budget,
+                        "dataset": "office31",
+                        "source": int(source),
+                        "target": int(target),
+                    }
+                )
+        if "visda-c" in datasets:
+            for source, target in VISDA_DIRECTION:
+                jobs.append(
+                    {
+                        "budget": budget,
+                        "dataset": "visda-c",
+                        "source": int(source),
+                        "target": int(target),
+                    }
+                )
+    return jobs
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="Run DeiT OTTA random group baseline across GPUs."
+    )
+    parser.add_argument(
+        "--budgets",
+        default=",".join(DEFAULT_BUDGETS),
+        help="Comma-separated structural budgets (default: 0.005,0.01,0.02,0.001,0.003).",
+    )
+    parser.add_argument(
+        "--gpus",
+        default="0,1,2,3,4,5,6,7",
+        help="Comma-separated GPU ids to schedule onto.",
+    )
+    parser.add_argument(
+        "--datasets",
+        default="office31,visda-c",
+        help="Comma-separated datasets (office31,visda-c).",
+    )
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--workers", type=int)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--data-root")
+    parser.add_argument("--source-checkpoint-root")
+    parser.add_argument("--output-root")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the job->GPU assignment without launching anything.",
+    )
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    budgets = [
+        float(value.strip()) for value in args.budgets.split(",") if value.strip()
+    ]
+    if not budgets:
+        raise SystemExit("no budgets selected")
+    gpus = [int(value) for value in args.gpus.split(",") if value.strip()]
+    if not gpus:
+        raise SystemExit("no GPUs selected")
+    datasets = [
+        value.strip() for value in args.datasets.split(",") if value.strip()
+    ]
+    jobs = build_jobs(budgets, datasets)
+    total_jobs = len(jobs)
+    if total_jobs == 0:
+        raise SystemExit("no jobs to run")
+
+    output_root = (
+        Path(args.output_root).resolve()
+        if args.output_root
+        else config_output_root()
+    )
+    log_dir = output_root / "launcher_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    print(
+        f"jobs={total_jobs} gpus={gpus} budgets={budgets} "
+        f"datasets={datasets} log_dir={log_dir}",
+        flush=True,
+    )
+
+    assignment = []
+    for index, job in enumerate(jobs):
+        gpu = gpus[index % len(gpus)]
+        assignment.append((gpu, job))
+    if args.dry_run:
+        for gpu, job in assignment:
+            print(
+                f"  gpu {gpu:2d}  budget={job['budget']:<6} "
+                f"{job['dataset']:<8} s{job['source']}->t{job['target']}",
+                flush=True,
+            )
+        return 0
+
+    base_command = [sys.executable, str(ENTRYPOINT)]
+    overrides = []
+    for name, value in (
+        ("batch-size", args.batch_size),
+        ("workers", args.workers),
+        ("seed", args.seed),
+        ("data-root", args.data_root),
+        ("source-checkpoint-root", args.source_checkpoint_root),
+        ("output-root", args.output_root),
+    ):
+        if value is not None:
+            overrides.extend([f"--{name}", str(value)])
+
+    pending = list(assignment)
+    free_gpus = list(gpus)
+    running = {}
+    results = []
+    started_at = utc_now()
+
+    while pending or running:
+        while pending and free_gpus:
+            gpu, job = pending.pop(0)
+            free_gpus.remove(gpu)
+            task_name = f"{job['dataset']}_s{job['source']}_t{job['target']}"
+            log_path = (
+                log_dir
+                / f"budget_{job['budget']}_{task_name}_gpu{gpu}.log"
+            )
+            command = (
+                base_command
+                + ["--gpu-id", str(gpu)]
+                + ["--budget", str(job["budget"])]
+                + ["--dataset", job["dataset"]]
+                + ["--source", str(job["source"]), "--target", str(job["target"])]
+                + overrides
+            )
+            print(
+                f"[start] gpu {gpu} budget={job['budget']} {job['dataset']} "
+                f"s{job['source']}->t{job['target']} log={log_path.name}",
+                flush=True,
+            )
+            with open(log_path, "w", encoding="utf-8") as log_file:
+                proc = subprocess.Popen(
+                    command,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+            running[gpu] = (proc, job, log_path, time.monotonic())
+
+        finished = False
+        for gpu, (proc, job, log_path, started) in list(running.items()):
+            return_code = proc.poll()
+            if return_code is not None:
+                elapsed = time.monotonic() - started
+                status = "ok" if return_code == 0 else f"FAIL(rc={return_code})"
+                print(
+                    f"[done] gpu {gpu} budget={job['budget']} "
+                    f"{job['dataset']} s{job['source']}->t{job['target']} "
+                    f"{status} {elapsed:.0f}s log={log_path.name}",
+                    flush=True,
+                )
+                results.append({**job, "gpu": gpu, "return_code": return_code})
+                del running[gpu]
+                free_gpus.append(gpu)
+                finished = True
+        if not finished and running:
+            time.sleep(POLL_SECONDS)
+
+    summary = {
+        "schema_version": 1,
+        "started_at_utc": started_at,
+        "completed_at_utc": utc_now(),
+        "jobs": total_jobs,
+        "ok": sum(1 for result in results if result["return_code"] == 0),
+        "failed": sum(1 for result in results if result["return_code"] != 0),
+        "results": results,
+    }
+    summary_path = log_dir / "launcher_summary.json"
+    summary_path.write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    print(
+        f"launcher done: ok={summary['ok']} failed={summary['failed']} "
+        f"summary={summary_path}",
+        flush=True,
+    )
+    return 0 if summary["failed"] == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
