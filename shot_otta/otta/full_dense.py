@@ -1,11 +1,13 @@
-"""Sequential no-adaptation DeiT OTTA control and structured artifacts."""
+"""Sequential full-dense DeiT OTTA baseline: SHOT objective + AdamW updates."""
 
+import copy
 import os.path as osp
 import sys
 import time
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from shot_otta.artifacts import (
     append_jsonl,
@@ -14,11 +16,15 @@ from shot_otta.artifacts import (
     dump_json,
     git_info,
 )
-from shot_otta.backbones.deit import hash_model_state, load_frozen_deit_source
+from shot_otta.backbones.deit import (
+    hash_model_state,
+    load_deit_source_for_adaptation,
+)
 from shot_otta.config import dump_yaml
-from shot_otta.deit_source_only.config import experiment_output_root
 from shot_otta.deit_source_only.runtime import (
     ARTIFACT_SCHEMA_VERSION,
+    autocast_context,
+    build_grad_scaler,
     build_target_loader,
     compute_fixed_class_metrics,
     environment_record,
@@ -29,12 +35,43 @@ from shot_otta.deit_source_only.runtime import (
     set_reproducibility,
     utc_now,
 )
+from shot_otta.losses import deit_shot_adaptation_loss
+from shot_otta.otta.full_dense_config import experiment_output_root
 
 
-def run_source_only_otta_experiment(config, project_root, *, model_factory=None):
-    """Evaluate a DeiT W0 as a sequential OTTA source-only control."""
-    if config.get("task") != "otta":
-        raise ValueError("DeiT OTTA runner requires task=otta")
+def _delta_stats(model, initial_state):
+    """Count changed scalars and the L2 norm of W_T - W_0."""
+    nonzero = 0
+    total = 0
+    squared = 0.0
+    for name, parameter in model.named_parameters():
+        difference = parameter.detach() - initial_state[name].to(
+            parameter.device
+        )
+        nonzero += int((difference != 0).sum().item())
+        total += int(difference.numel())
+        squared += float(difference.pow(2).sum().item())
+    return {
+        "delta_nonzero_scalars": nonzero,
+        "total_parameter_scalars": total,
+        "delta_l2_norm": float(squared**0.5),
+    }
+
+
+def run_full_dense_otta_experiment(
+    config, project_root, *, model_factory=None
+):
+    """Run the DeiT full-dense OTTA baseline.
+
+    Protocol: sequential target stream.  Every batch runs ``steps_per_batch``
+    AdamW updates on the SHOT objective; the updated model then predicts the
+    same batch (PU).  After the stream the model is frozen and an independent
+    full-target pass produces FO metrics.
+    """
+    if config.get("task") != "otta" or config.get("variant") != "full_dense":
+        raise ValueError(
+            "full-dense runner requires task=otta variant=full_dense"
+        )
     output_root = experiment_output_root(config)
     run_id, output_dir = create_run_dir(
         output_root,
@@ -50,14 +87,15 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
     dump_yaml(paths["config"], config)
     started_at = utc_now()
     timer = time.perf_counter()
+    steps_per_batch = int(config["adaptation"]["steps_per_batch"])
     base_manifest = {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
         "run_id": run_id,
         "created_at_utc": started_at,
-        "method": "no_tta",
+        "method": "shot",
         "task": "otta",
-        "protocol": "sequential_target_stream_no_adaptation",
-        "variant": "source_only",
+        "protocol": "sequential_target_stream_full_dense_adaptation",
+        "variant": "full_dense",
         "dataset": config["data"]["dataset"],
         "source": config["data"]["source"],
         "target": config["data"]["target"],
@@ -82,13 +120,17 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
             )
         },
         "adaptation": {
-            "steps_per_batch": 0,
-            "optimizer_created": False,
-            "loss_computed": False,
-            "backward_calls": 0,
-            "state_carried_between_batches": True,
+            "update_scope": config["adaptation"]["update_scope"],
+            "model_mode": config["adaptation"]["model_mode"],
+            "steps_per_batch": steps_per_batch,
+            "delta_semantics": "unrestricted_accumulation",
+            "budget": "full",
             "target_labels_usage": "evaluation_only",
+            "state_carried_between_batches": True,
+            "tail_batch_size_one_policy": "kept",
         },
+        "optimization": copy.deepcopy(config["optimization"]),
+        "loss": copy.deepcopy(config["loss"]),
     }
     dump_json(paths["manifest"], base_manifest)
 
@@ -96,45 +138,70 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
         device_type = config["device"]["type"]
         if device_type == "cuda":
             if not torch.cuda.is_available():
-                raise RuntimeError("CUDA evaluation requested but CUDA is unavailable")
+                raise RuntimeError(
+                    "CUDA evaluation requested but CUDA is unavailable"
+                )
             device = torch.device("cuda:0")
-            # torch 2.4.1 raises "Invalid device argument" when an explicit
-            # device index is passed before the CUDA caching allocator has been
-            # initialized. Reset the current device's stats instead.
+            # See the source-only runner: reset the current device's stats
+            # because an explicit index can be rejected before the caching
+            # allocator initializes.
             torch.cuda.reset_peak_memory_stats()
         else:
             device = torch.device("cpu")
-        amp_effective = bool(config["evaluation"]["amp"] and device.type == "cuda")
+        amp_effective = bool(
+            config["evaluation"]["amp"] and device.type == "cuda"
+        )
         set_reproducibility(
             config["seed"], config["evaluation"]["deterministic"]
         )
         print(
-            "[otta] loading source checkpoint: "
+            "[otta-full-dense] loading source checkpoint: "
             f"{config['source_checkpoint']['path']}",
             flush=True,
         )
-        model, checkpoint_metadata = load_frozen_deit_source(
-            config,
-            device,
-            model_factory=model_factory,
+        model, checkpoint_metadata = load_deit_source_for_adaptation(
+            config, device, model_factory=model_factory
         )
         state_before = hash_model_state(model)
+        initial_state = {
+            name: parameter.detach().clone()
+            for name, parameter in model.named_parameters()
+        }
+        trainable_scalars = sum(
+            parameter.numel()
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        )
         print(
-            f"[otta] W0 loaded and frozen (state_sha256={state_before[:12]}...)",
+            "[otta-full-dense] W0 loaded, trainable scalars="
+            f"{trainable_scalars} (state_sha256={state_before[:12]}...)",
             flush=True,
         )
 
+        optimization = config["optimization"]
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=float(optimization["lr"]),
+            betas=tuple(float(value) for value in optimization["betas"]),
+            eps=float(optimization["eps"]),
+            weight_decay=float(optimization["weight_decay"]),
+        )
+        scaler = build_grad_scaler(device, amp_effective)
         records, loader = build_target_loader(config)
+        loss_config = config["loss"]
 
+        pu_labels, pu_predictions, pu_indices = [], [], []
         batch_sample_counts = []
+        backward_calls = 0
+        total_steps = 0
 
-        def record_batch(stream_batch, labels, predictions, indices):
+        def record_batch(
+            stream_batch, labels, predictions, indices, loss, loss_stats
+        ):
             batch_sample_counts.append(int(labels.numel()))
             batch_accuracy = float(
-                (predictions == labels).to(torch.float32).mean().item() * 100.0
-            )
-            batch_prediction_sha256 = prediction_sha256(
-                indices.numpy(), labels.numpy(), predictions.numpy()
+                (predictions == labels).to(torch.float32).mean().item()
+                * 100.0
             )
             append_jsonl(
                 paths["metrics"],
@@ -151,52 +218,115 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
                     "first_sample_index": int(indices[0].item()),
                     "last_sample_index": int(indices[-1].item()),
                     "PU-batch-overall-Acc": batch_accuracy,
-                    "adaptation_steps": 0,
-                    "optimizer_created": False,
-                    "loss_computed": False,
-                    "backward_calls": 0,
-                    "model_update_applied": False,
-                    "state_carried_to_next_batch": stream_batch < len(loader),
+                    "loss_total": float(loss.item()),
+                    **loss_stats,
+                    "adaptation_steps": steps_per_batch,
+                    "backward_calls": int(backward_calls),
+                    "optimizer_created": True,
+                    "loss_computed": True,
+                    "model_update_applied": True,
+                    "state_carried_to_next_batch": (
+                        stream_batch < len(loader)
+                    ),
                     "target_labels_usage": "evaluation_only",
-                    "prediction_sha256": batch_prediction_sha256,
+                    "prediction_sha256": prediction_sha256(
+                        indices.numpy(), labels.numpy(), predictions.numpy()
+                    ),
                 },
             )
+            return batch_accuracy
 
-        pu_labels, pu_predictions, pu_indices = evaluate_model(
-            model,
+        stream = tqdm(
             loader,
-            device,
-            amp=amp_effective,
-            on_batch=record_batch,
-            progress_label="OTTA PU",
+            total=len(loader),
+            desc="OTTA adapt",
+            file=sys.stdout,
+            dynamic_ncols=True,
+            mininterval=1.0,
         )
+        for stream_batch, (images, labels, indices) in enumerate(
+            stream, start=1
+        ):
+            images = images.to(device, non_blocking=True)
+            batch_loss = None
+            for _ in range(steps_per_batch):
+                optimizer.zero_grad(set_to_none=True)
+                with autocast_context(device, amp_effective):
+                    logits = model(images)
+                    batch_loss, loss_stats = deit_shot_adaptation_loss(
+                        logits, loss_config
+                    )
+                if scaler is not None:
+                    scaler.scale(batch_loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    batch_loss.backward()
+                    optimizer.step()
+                backward_calls += 1
+                total_steps += 1
+            with torch.inference_mode():
+                with autocast_context(device, amp_effective):
+                    logits = model(images)
+                predictions = logits.argmax(dim=1).cpu()
+            labels_cpu = torch.as_tensor(labels).cpu()
+            indices_cpu = torch.as_tensor(indices).cpu()
+            batch_accuracy = record_batch(
+                stream_batch,
+                labels_cpu,
+                predictions,
+                indices_cpu,
+                batch_loss,
+                loss_stats,
+            )
+            pu_labels.append(labels_cpu)
+            pu_predictions.append(predictions)
+            pu_indices.append(indices_cpu)
+            stream.set_postfix(
+                loss=f"{float(batch_loss.item()):.3f}",
+                acc=f"{batch_accuracy:.1f}",
+                refresh=False,
+            )
+        stream.close()
+
+        pu_labels_array = torch.cat(pu_labels).numpy()
+        pu_predictions_array = torch.cat(pu_predictions).numpy()
+        pu_indices_array = torch.cat(pu_indices).numpy()
         require_sequential_complete(
-            pu_indices, len(records), protocol="OTTA PU stream"
+            pu_indices_array, len(records), protocol="OTTA PU stream"
         )
         state_after_stream = hash_model_state(model)
-        if state_before != state_after_stream:
-            raise RuntimeError("Source-only OTTA stream modified model state")
-        if any(parameter.grad is not None for parameter in model.parameters()):
-            raise RuntimeError("Source-only OTTA unexpectedly created gradients")
+        if state_after_stream == state_before:
+            raise RuntimeError(
+                "full-dense OTTA stream did not modify model state"
+            )
+        delta_stats = _delta_stats(model, initial_state)
 
-        # FO follows the paper protocol: freeze W_T after the stream, then run
-        # a separate complete target-set evaluation pass.  For source-only,
-        # W_T == W_0 and the two prediction arrays must still match exactly.
+        # FO follows the paper protocol: freeze W_T after the stream, then
+        # run a separate complete target-set evaluation pass.
+        optimizer.zero_grad(set_to_none=True)
+        model.requires_grad_(False)
+        model.eval()
+        if any(parameter.grad is not None for parameter in model.parameters()):
+            raise RuntimeError(
+                "full-dense OTTA left non-None gradients after stream"
+            )
         fo_labels, fo_predictions, fo_indices = evaluate_model(
             model,
             loader,
             device,
             amp=amp_effective,
             progress_label="OTTA FO",
+            use_tqdm=True,
         )
         require_sequential_complete(
             fo_indices, len(records), protocol="OTTA FO evaluation"
         )
         state_after_fo = hash_model_state(model)
-        if state_after_stream != state_after_fo:
+        if state_after_fo != state_after_stream:
             raise RuntimeError("OTTA FO evaluation modified final model state")
-        if not np.array_equal(pu_indices, fo_indices) or not np.array_equal(
-            pu_labels, fo_labels
+        if not np.array_equal(pu_indices_array, fo_indices) or not np.array_equal(
+            pu_labels_array, fo_labels
         ):
             raise RuntimeError("OTTA PU and FO evaluated different target samples")
 
@@ -204,38 +334,27 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
             "num_classes": config["data"]["num_classes"],
             "class_names": config["data"]["class_names"],
         }
-        pu_base_metrics = compute_fixed_class_metrics(
-            pu_labels,
-            pu_predictions,
-            **metric_kwargs,
+        pu_metrics = prefixed_metrics(
+            compute_fixed_class_metrics(
+                pu_labels_array, pu_predictions_array, **metric_kwargs
+            ),
+            "PU",
         )
-        fo_base_metrics = compute_fixed_class_metrics(
-            fo_labels,
-            fo_predictions,
-            **metric_kwargs,
+        fo_metrics = prefixed_metrics(
+            compute_fixed_class_metrics(
+                fo_labels, fo_predictions, **metric_kwargs
+            ),
+            "FO",
         )
-        pu_metrics = prefixed_metrics(pu_base_metrics, "PU")
-        fo_metrics = prefixed_metrics(fo_base_metrics, "FO")
-        pu_fo_predictions_equal = np.array_equal(
-            pu_predictions, fo_predictions
-        )
-        if not pu_fo_predictions_equal:
-            raise RuntimeError("Source-only OTTA PU and FO predictions differ")
-        pu_fo_metrics_equal = all(
-            pu_metrics[key] == fo_metrics[key.replace("PU-", "FO-", 1)]
-            for key in pu_metrics
-        )
-        if not pu_fo_metrics_equal:
-            raise RuntimeError("Source-only OTTA PU and FO metrics differ")
-
         pu_prediction_sha256 = prediction_sha256(
-            pu_indices, pu_labels, pu_predictions
+            pu_indices_array, pu_labels_array, pu_predictions_array
         )
         fo_prediction_sha256 = prediction_sha256(
             fo_indices, fo_labels, fo_predictions
         )
-        if pu_prediction_sha256 != fo_prediction_sha256:
-            raise RuntimeError("Source-only OTTA PU and FO prediction hashes differ")
+        predictions_equal = np.array_equal(
+            pu_predictions_array, fo_predictions
+        )
 
         runtime = float(time.perf_counter() - timer)
         peak_memory = (
@@ -245,28 +364,27 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
         )
         completed_at = utc_now()
         invariant_record = {
-            "adaptation_steps": 0,
-            "adaptation_steps_per_batch": 0,
-            "optimizer_created": False,
-            "loss_computed": False,
-            "backward_calls": 0,
+            "adaptation_steps": total_steps,
+            "adaptation_steps_per_batch": steps_per_batch,
+            "optimizer_created": True,
+            "loss_computed": True,
+            "backward_calls": backward_calls,
             "target_labels_usage": "evaluation_only",
             "prediction_passes": 2,
             "stream_prediction_passes": 1,
             "fo_prediction_passes": 1,
             "fo_predictions_reused": False,
             "fo_evaluation_scope": "full_target_dataset",
-            "PU-equals-FO": True,
-            "PU-predictions-equal-FO": True,
+            "PU-predictions-equal-FO": predictions_equal,
             "model_state_sha256_before": state_before,
             "model_state_sha256_after_stream": state_after_stream,
             "model_state_sha256_after_fo": state_after_fo,
             "model_state_sha256_after": state_after_fo,
-            "model_state_unchanged": True,
+            "model_state_unchanged": False,
             "PU-prediction-sha256": pu_prediction_sha256,
             "FO-prediction-sha256": fo_prediction_sha256,
-            "processed_sample_count": int(pu_labels.size),
-            "stream_processed_sample_count": int(pu_labels.size),
+            "processed_sample_count": int(pu_labels_array.size),
+            "stream_processed_sample_count": int(pu_labels_array.size),
             "fo_processed_sample_count": int(fo_labels.size),
             "target_batch_count": int(len(loader)),
             "stream_batch_count": int(len(loader)),
@@ -275,6 +393,10 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
             "tail_batch_size_one_policy": "kept",
             "drop_last": False,
             "state_carried_between_batches": True,
+            "delta_nonzero_scalars": delta_stats["delta_nonzero_scalars"],
+            "total_parameter_scalars": delta_stats["total_parameter_scalars"],
+            "delta_l2_norm": delta_stats["delta_l2_norm"],
+            "trainable_scalars": trainable_scalars,
         }
         final_record = {
             "schema_version": ARTIFACT_SCHEMA_VERSION,
@@ -295,10 +417,10 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
             "status": "completed",
             "run_id": run_id,
             "output_dir": output_dir,
-            "method": "no_tta",
-            "variant": "source_only",
+            "method": "shot",
+            "variant": "full_dense",
             "task": "otta",
-            "protocol": "sequential_target_stream_no_adaptation",
+            "protocol": "sequential_target_stream_full_dense_adaptation",
             "dataset": config["data"]["dataset"],
             "source": config["data"]["source"],
             "target": config["data"]["target"],
@@ -321,6 +443,9 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
                 "source_training_seed"
             ],
             "source_best": config["source_checkpoint"]["best"],
+            "adaptation": copy.deepcopy(base_manifest["adaptation"]),
+            "optimization": copy.deepcopy(config["optimization"]),
+            "loss": copy.deepcopy(config["loss"]),
             **pu_metrics,
             **fo_metrics,
             **invariant_record,
@@ -359,8 +484,8 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
                 "experiment_config_sha256": config[
                     "experiment_config_sha256"
                 ],
-                "method": "no_tta",
-                "variant": "source_only",
+                "method": "shot",
+                "variant": "full_dense",
                 "task": "otta",
                 "dataset": config["data"]["dataset"],
                 "source": config["data"]["source"],

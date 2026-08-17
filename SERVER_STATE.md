@@ -80,8 +80,24 @@ overall and per-class metrics. FO is a separate full-target prediction pass
 after the stream, matching the final-offline protocol. Zero adaptation means
 the final model is still `W0`, so the implementation requires the independent
 PU/FO predictions and the before/after model hashes to match exactly. No real
-OTTA evaluation has been launched by Codex. Trainable DeiT OTTA remains
-unimplemented.
+OTTA evaluation has been launched by Codex.
+
+## OTTA Full-dense Output
+
+The DeiT full-dense OTTA baseline is implemented locally but not yet run on
+the server. It uses the same sequential-stream protocol as the source-only
+control, but every batch runs one AdamW update on the SHOT objective
+(entropy + diversity + confident pseudo-label CE) over all model parameters;
+the default result root is:
+
+`/home/nas3/biod/wangkangyi/results/transformer_otta_full_dense/`
+
+This root is the implementation default only; it has not been frozen as the
+formal trainable-OTTA output root. The optimizer is frozen in the config as
+AdamW with `lr=1.0e-5`, `betas=[0.9, 0.999]`, `eps=1.0e-8`,
+`weight_decay=0.01`, one step per batch, model mode `eval`, and
+`delta_semantics: unrestricted_accumulation`. No real full-dense evaluation
+has been launched by Codex.
 
 ## Server Boundary
 

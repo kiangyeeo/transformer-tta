@@ -39,9 +39,9 @@ W^{\mathrm{TTA}} = W_0 + \Delta W,
 | Conv dense update | 部分已有 | `full_dense` 更新 `netF + netB`，因此会更新 ResNet Conv；这不是 Conv group sparse update |
 | Conv filter/channel Group Split-LBI | 未发现 | 当前 Git 仅有 `master/origin/master`，仓库和历史中没有相应实现 |
 | DeiT source trainer | 已实现；4 个 W0 已在服务器产出 | `train_source_deit.py` 全量微调 non-distilled DeiT-S，直接 `Linear(384,31/12)` head；2026-08-17 用户确认 Office-31 三域和 VisDA-C train 的 `.pth` 均位于 catalog 约定路径，本地尚未核验 manifest/hash |
-| DeiT/Transformer TTA backbone | 部分已有 | 已有严格本地 W0 加载、TTDA source-only 直接评测和 OTTA source-only 流式评测；可训练 OTTA/TTDA 与 structural adaptation 尚未接入 |
+| DeiT/Transformer TTA backbone | 部分已有 | 已有严格本地 W0 加载、TTDA source-only 直接评测、OTTA source-only 流式评测和 OTTA full-dense 可训练 baseline；Candidate-dense 与 structural adaptation 尚未接入 |
 | Transformer structural groups | 未实现 | 没有 group registry、group prox、group mask/scatter |
-| OTTA | source-only 与 legacy FC 已实现 | `evaluate_deit_otta.py` 提供 DeiT 零适配流式 control；legacy ResNet/VGG 路径支持每 batch 适配。DeiT 可训练 OTTA 尚未实现 |
+| OTTA | source-only、full-dense 与 legacy FC 已实现 | `evaluate_deit_otta.py` 提供 DeiT 零适配流式 control；`evaluate_deit_otta_full_dense.py` 提供 SHOT objective + AdamW 的全参数 dense update（本地已实现，服务器未运行）；legacy ResNet/VGG 路径支持每 batch 适配。DeiT 可训练 sparse OTTA 尚未实现 |
 | TTDA | 仅 source-only control | `evaluate_deit_ttda.py` 支持零适配的完整 target dataset 评测；任何 TTDA adaptation 生命周期仍未实现 |
 | TENT/EATA/CoTTA 等独立 TTA 方法 | 未实现 | 现有 baseline 是同一 SHOT objective 下的更新/选择 baseline |
 | Source-domain trainer | ResNet/VGG + DeiT 可用 | legacy SHOT 三文件路径保持不变；DeiT 使用新单文件 schema、source-only validation 与每 epoch resume state |
@@ -61,11 +61,12 @@ transformer-tta/
 ├── train.py                     # 现有 SHOT-OTTA 单次实验入口
 ├── evaluate_deit_ttda.py        # DeiT TTDA source-only 零适配评测入口
 ├── evaluate_deit_otta.py        # DeiT OTTA source-only 顺序流评测入口
+├── evaluate_deit_otta_full_dense.py  # DeiT OTTA full-dense 可训练评测入口
 ├── train_source_deit.py         # DeiT-S source-domain 训练统一入口
-├── experiment_identity.py       # legacy FC 与 DeiT TTDA/OTTA source-only 实验身份
+├── experiment_identity.py       # legacy FC 与 DeiT TTDA/OTTA 实验身份
 ├── shot_otta/                   # 数据、模型、loss、trainer、artifact
 │   ├── deit_source_only/         # DeiT 零适配公共 config/runtime/CLI 基础设施
-│   ├── otta/                     # DeiT OTTA 协议生命周期
+│   ├── otta/                     # DeiT OTTA 协议生命周期（source-only + full-dense）
 │   └── ttda/                     # DeiT TTDA 协议生命周期与兼容入口
 ├── core/lbi/                    # 逐元素 Split-LBI engine/state/diagnostics
 ├── source_training/             # SHOT 风格 ResNet/VGG source trainer
@@ -74,11 +75,11 @@ transformer-tta/
 │   ├── deit_model.py            # local-only safetensors 与单文件 W0 loader
 │   └── deit_trainer.py          # full-model fine-tune、resume、artifact
 ├── visda_otta/                  # VisDA 指标和适配辅助代码
-├── configs/                     # 单次运行配置
+├── configs/                     # 单次运行配置（含 deit_otta_full_dense.yaml）
 ├── experiments/                 # 实验矩阵
 ├── tools/                       # planner、launcher、status、summary
 ├── scripts/                     # 维护脚本
-├── tests/                       # 合成 smoke/工程测试
+├── tests/                       # 合成 smoke/工程测试（含 full-dense CPU 契约）
 ├── TRANSFORMER_GROUP_SPLIT_LBI_PROPOSAL_DOLLAR_MATH.md
 ├── SOURCE_TRAINING_DEIT_PROTOCOL.md
 └── 26445_Test_Time_Adaptation_via (1).pdf
@@ -191,7 +192,7 @@ tests/source_checkpoint_compatibility_test.py
 
 1. 离线加载 DeiT-S，完成 forward 和 parameter-name contract；
 2. ~~完成 DeiT source-domain trainer、checkpoint round trip 与服务器四域训练；~~ 代码/合成测试已完成，4 个真实数据 W0 已由用户确认产出；manifest/hash/指标仍待归档；
-3. ~~跑通 TTDA/OTTA Source-only、~~再实现并跑通 Full-dense、last-3 Candidate-dense；（当前完成两个零适配 control）
+3. ~~跑通 TTDA/OTTA Source-only、~~再实现并跑通 Full-dense、last-3 Candidate-dense；（当前完成两个零适配 control 与 full-dense baseline，均本地实现、服务器未运行）
 4. 抽象 group API，以 FC singleton 测试证明 legacy 行为未变；
 5. 实现并测试 paired/independent Transformer groups；
 6. 实现 matched-budget Random/Magnitude/Saliency；

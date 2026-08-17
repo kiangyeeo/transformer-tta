@@ -448,3 +448,116 @@ def resolve_deit_otta_source_only_identity(
                 "effective DeiT OTTA source-only configuration"
             )
     return computed
+
+
+def build_deit_otta_full_dense_identity(config):
+    """Build an identity for the DeiT full-dense OTTA baseline.
+
+    The SHOT objective plus AdamW dense updates form a new protocol, so the
+    identity is separate from both the legacy FC identity and the DeiT
+    source-only identity.  Optimizer, loss, and adaptation settings are
+    identity-bound: changing them produces a different experiment key.
+    """
+    data = config["data"]
+    checkpoint = config["source_checkpoint"]
+    evaluation = config["evaluation"]
+    adaptation = config["adaptation"]
+    scientific_config = {
+        "method": "shot",
+        "task": "otta",
+        "protocol": "sequential_target_stream_full_dense_adaptation",
+        "variant": "full_dense",
+        "dataset": data["dataset"],
+        "source": int(data["source"]),
+        "target": int(data["target"]),
+        "source_name": data["source_name"],
+        "target_name": data["target_name"],
+        "seed": int(config["seed"]),
+        "model": {
+            "name": config["model"]["name"],
+            "implementation": "timm",
+            "non_distilled": True,
+            "head_schema": config["model"]["head_schema"],
+            "drop_rate": 0.0,
+            "drop_path_rate": 0.0,
+        },
+        "source_checkpoint": {
+            "sha256": checkpoint["sha256"],
+            "schema_version": checkpoint["schema_version"],
+            "kind": checkpoint["kind"],
+            "source_training_seed": checkpoint["source_training_seed"],
+        },
+        "target_stream": {
+            "list_sha256": data["target_list_sha256"],
+            "class_mapping_sha256": data["class_mapping_sha256"],
+            "sample_count": int(data["target_sample_count"]),
+            "num_classes": int(data["num_classes"]),
+            "order": "sequential",
+            "drop_last": False,
+            "tail_batch_size_one_policy": "kept",
+        },
+        "preprocessing": copy.deepcopy(config["preprocessing"]),
+        "evaluation": {
+            "batch_size": int(evaluation["batch_size"]),
+            "amp": bool(evaluation["amp"]),
+            "deterministic": bool(evaluation["deterministic"]),
+            "stream_prediction_passes": 1,
+            "fo_prediction_passes": 1,
+            "final_prediction_policy": "independent_full_target_pass",
+        },
+        "metrics": copy.deepcopy(config["metrics"]),
+        "adaptation": {
+            "update_scope": adaptation["update_scope"],
+            "model_mode": adaptation["model_mode"],
+            "steps_per_batch": int(adaptation["steps_per_batch"]),
+            "delta_semantics": "unrestricted_accumulation",
+            "budget": "full",
+            "target_labels_usage": "evaluation_only",
+            "state_carried_between_batches": True,
+        },
+        "optimization": copy.deepcopy(config["optimization"]),
+        "loss": copy.deepcopy(config["loss"]),
+    }
+    canonical_json = canonical_scientific_json(scientific_config)
+    full_sha256 = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    experiment_key = "__".join(
+        [
+            "shot",
+            "otta",
+            data["dataset"],
+            f"s{int(data['source'])}-t{int(data['target'])}",
+            f"seed{int(config['seed'])}",
+            "full_dense",
+            full_sha256[:12],
+        ]
+    )
+    return {
+        "experiment_key": experiment_key,
+        "experiment_config_sha256": full_sha256,
+        "scientific_config": scientific_config,
+    }
+
+
+def resolve_deit_otta_full_dense_identity(
+    config,
+    provided_key=None,
+    provided_sha256=None,
+):
+    computed = build_deit_otta_full_dense_identity(config)
+    if (provided_key is None) != (provided_sha256 is None):
+        raise ValueError(
+            "experiment_key and experiment_config_sha256 must be "
+            "provided together"
+        )
+    if provided_key is not None:
+        if provided_key != computed["experiment_key"]:
+            raise ValueError(
+                "Provided experiment_key does not match the effective DeiT "
+                "OTTA full-dense configuration"
+            )
+        if provided_sha256 != computed["experiment_config_sha256"]:
+            raise ValueError(
+                "Provided experiment_config_sha256 does not match the "
+                "effective DeiT OTTA full-dense configuration"
+            )
+    return computed

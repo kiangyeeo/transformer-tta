@@ -53,6 +53,18 @@ def _validate_loaded_metadata(metadata, config):
         )
 
 
+def _check_direct_head(model, config):
+    head = model.get_classifier()
+    if not isinstance(head, nn.Linear):
+        raise TypeError("DeiT TTA requires a direct Linear head")
+    expected_classes = config["data"]["num_classes"]
+    if head.in_features != 384 or head.out_features != expected_classes:
+        raise ValueError(
+            f"Unexpected DeiT head shape {head.in_features}->{head.out_features}"
+        )
+    return head
+
+
 def load_frozen_deit_source(config, device, *, model_factory=None):
     """Load W0, validate its metadata/head, freeze it, and select eval mode."""
     checkpoint = config["source_checkpoint"]
@@ -63,16 +75,31 @@ def load_frozen_deit_source(config, device, *, model_factory=None):
         model_factory=model_factory,
     )
     _validate_loaded_metadata(metadata, config)
-    head = model.get_classifier()
-    if not isinstance(head, nn.Linear):
-        raise TypeError("DeiT source-only TTA requires a direct Linear head")
-    expected_classes = config["data"]["num_classes"]
-    if head.in_features != 384 or head.out_features != expected_classes:
-        raise ValueError(
-            f"Unexpected DeiT head shape {head.in_features}->{head.out_features}"
-        )
+    _check_direct_head(model, config)
     model.requires_grad_(False)
     model.eval()
     if any(parameter.requires_grad for parameter in model.parameters()):
         raise RuntimeError("Source-only model freezing failed")
+    return model, metadata
+
+
+def load_deit_source_for_adaptation(config, device, *, model_factory=None):
+    """Load W0, validate its metadata/head, and enable dense gradients.
+
+    All parameters become trainable; the model stays in eval mode so the
+    frozen drop_rate/drop_path_rate of 0.0 keep the stream deterministic.
+    """
+    checkpoint = config["source_checkpoint"]
+    model, metadata = load_deit_source_checkpoint(
+        checkpoint["path"],
+        device=device,
+        expected_sha256=checkpoint["sha256"],
+        model_factory=model_factory,
+    )
+    _validate_loaded_metadata(metadata, config)
+    _check_direct_head(model, config)
+    model.requires_grad_(True)
+    model.eval()
+    if not all(parameter.requires_grad for parameter in model.parameters()):
+        raise RuntimeError("Full-dense adaptation failed to enable gradients")
     return model, metadata

@@ -10,17 +10,15 @@ def entropy(probabilities):
     return torch.sum(values, dim=1)
 
 
-def shot_adaptation_loss(inputs, net_f, net_b, net_c, loss_config):
-    """Compute the one-batch SHOT objective used by dense and LBI variants."""
-    features = net_b(net_f(inputs))
-    outputs = net_c(features)
+def _shot_objective(outputs, loss_config):
+    """Compute the one-batch SHOT objective on raw outputs/logits."""
     probabilities = nn.Softmax(dim=1)(outputs)
     enabled_losses = set(loss_config["components"])
 
-    total_loss = torch.tensor(0.0, device=inputs.device)
-    classification_loss = torch.tensor(0.0, device=inputs.device)
-    entropy_loss = torch.tensor(0.0, device=inputs.device)
-    diversity_loss = torch.tensor(0.0, device=inputs.device)
+    total_loss = torch.tensor(0.0, device=outputs.device)
+    classification_loss = torch.tensor(0.0, device=outputs.device)
+    entropy_loss = torch.tensor(0.0, device=outputs.device)
+    diversity_loss = torch.tensor(0.0, device=outputs.device)
     pseudo_ratio = None
     max_probability_mean = None
 
@@ -57,3 +55,19 @@ def shot_adaptation_loss(inputs, net_f, net_b, net_c, loss_config):
         "pseudo_ratio": pseudo_ratio,
         "max_prob_mean": max_probability_mean,
     }
+
+
+def shot_adaptation_loss(inputs, net_f, net_b, net_c, loss_config):
+    """Compute the one-batch SHOT objective used by dense and LBI variants."""
+    features = net_b(net_f(inputs))
+    outputs = net_c(features)
+    return _shot_objective(outputs, loss_config)
+
+
+def deit_shot_adaptation_loss(logits, loss_config):
+    """Compute the one-batch SHOT objective directly on DeiT logits.
+
+    DeiT has no separate bottleneck, so its logits are already the
+    ``net_c(features)`` term of the legacy path.
+    """
+    return _shot_objective(logits, loss_config)

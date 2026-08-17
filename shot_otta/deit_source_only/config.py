@@ -275,26 +275,42 @@ def apply_overrides(config, args):
     return effective
 
 
-def resolve_config(
-    config,
-    project_root,
-    *,
-    provided_key=None,
-    provided_sha256=None,
-    expected_task=None,
-):
+def deit_metrics_policy(task):
+    """Frozen metric policy shared by all DeiT OTTA/TTDA evaluators."""
+    if task == "otta":
+        return {
+            "primary": "macro_class_accuracy",
+            "primary_outputs": ["PU-Acc", "FO-Acc"],
+            "class_denominator": "fixed_dataset_classes",
+            "report_overall": True,
+            "report_per_class": True,
+            "final_prediction_policy": "independent_full_target_pass",
+        }
+    if task == "ttda":
+        return {
+            "primary": "macro_class_accuracy",
+            "primary_output": "Acc",
+            "class_denominator": "fixed_dataset_classes",
+            "report_overall": True,
+            "report_per_class": True,
+        }
+    raise ValueError("task must be otta or ttda")
+
+
+def _resolve_deit_common(config, project_root, task):
+    """Resolve the shared OTTA/TTDA backbone: schema, task, seed, data,
+    model/checkpoint, preprocessing, evaluation, device, output, task name.
+
+    Method/variant, metric policy, and experiment identity stay with each
+    task-specific resolver so the source-only controls remain byte-stable.
+    """
     effective = copy.deepcopy(config)
     if effective.get("schema_version") != CONFIG_SCHEMA_VERSION:
         raise ValueError(f"schema_version must be {CONFIG_SCHEMA_VERSION}")
-    fixed = {"method": "no_tta", "variant": "source_only"}
-    for field, expected in fixed.items():
-        if effective.get(field) != expected:
-            raise ValueError(f"{field} must be {expected}")
-    task = effective.get("task")
     if task not in {"otta", "ttda"}:
         raise ValueError("task must be otta or ttda")
-    if expected_task is not None and task != expected_task:
-        raise ValueError(f"task must be {expected_task}")
+    if effective.get("task") != task:
+        raise ValueError(f"task must be {task}")
     effective["seed"] = int(effective.get("seed", 2020))
 
     data = effective.get("data")
@@ -400,28 +416,6 @@ def resolve_config(
     if evaluation.get("drop_last") is not False:
         raise ValueError("DeiT source-only drop_last must be false")
 
-    metrics = effective.get("metrics")
-    expected_metrics = (
-        {
-            "primary": "macro_class_accuracy",
-            "primary_outputs": ["PU-Acc", "FO-Acc"],
-            "class_denominator": "fixed_dataset_classes",
-            "report_overall": True,
-            "report_per_class": True,
-            "final_prediction_policy": "independent_full_target_pass",
-        }
-        if task == "otta"
-        else {
-            "primary": "macro_class_accuracy",
-            "primary_output": "Acc",
-            "class_denominator": "fixed_dataset_classes",
-            "report_overall": True,
-            "report_per_class": True,
-        }
-    )
-    if metrics != expected_metrics:
-        raise ValueError(f"{task.upper()} source-only metric policy is frozen")
-
     device = effective.get("device")
     if not isinstance(device, dict) or device.get("type") not in ("cuda", "cpu"):
         raise ValueError("device.type must be cuda or cpu")
@@ -432,6 +426,29 @@ def resolve_config(
     output["root"] = _absolute(output["root"], project_root)
     output.setdefault("run_name", None)
     effective["task_name"] = f"{source_name[0].upper()}{target_name[0].upper()}"
+    return effective
+
+
+def resolve_config(
+    config,
+    project_root,
+    *,
+    provided_key=None,
+    provided_sha256=None,
+    expected_task=None,
+):
+    fixed = {"method": "no_tta", "variant": "source_only"}
+    for field, expected in fixed.items():
+        if config.get(field) != expected:
+            raise ValueError(f"{field} must be {expected}")
+    task = config.get("task")
+    if task not in {"otta", "ttda"}:
+        raise ValueError("task must be otta or ttda")
+    if expected_task is not None and task != expected_task:
+        raise ValueError(f"task must be {expected_task}")
+    effective = _resolve_deit_common(config, project_root, task)
+    if effective["metrics"] != deit_metrics_policy(task):
+        raise ValueError(f"{task.upper()} source-only metric policy is frozen")
 
     identity_resolver = (
         resolve_deit_otta_source_only_identity

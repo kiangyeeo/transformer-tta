@@ -1,0 +1,67 @@
+# DeiT-S OTTA full-dense baseline. Sequential stream, SHOT objective, AdamW
+# dense updates on all parameters (delta_semantics: unrestricted_accumulation).
+schema_version: 1
+method: shot
+task: otta
+variant: full_dense
+seed: 2020
+
+device:
+  type: cuda
+  gpu_id: "0"
+
+data:
+  dataset: office31
+  source: 0
+  target: 1
+  list_root: /home/nas3/biod/wangkangyi/datasets/image_lists
+
+model:
+  name: deit_small_patch16_224.fb_in1k
+  source_checkpoint_root: /home/nas3/biod/wangkangyi/checkpoints/source_models
+
+adaptation:
+  update_scope: all_parameters
+  model_mode: eval
+  steps_per_batch: 1
+
+optimization:
+  optimizer: adamw
+  lr: 1.0e-5
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.01
+
+loss:
+  components: [ent, div, pseudo]
+  cls_par: 0.3
+  ent_par: 1.0
+  threshold: 0.0
+
+preprocessing:
+  resize_size: 256
+  crop_size: 224
+  interpolation: bicubic
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+evaluation:
+  batch_size: 256
+  workers: 8
+  amp: true
+  deterministic: true
+  pin_memory: true
+  order: sequential
+  drop_last: false
+
+metrics:
+  primary: macro_class_accuracy
+  primary_outputs: [PU-Acc, FO-Acc]
+  class_denominator: fixed_dataset_classes
+  report_overall: true
+  report_per_class: true
+  final_prediction_policy: independent_full_target_pass
+
+output:
+  root: /home/nas3/biod/wangkangyi/results/transformer_otta_full_dense/runs
+  run_name: null

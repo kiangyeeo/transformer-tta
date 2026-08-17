@@ -1,15 +1,18 @@
 """Shared deterministic runtime for DeiT source-only TTA controls."""
 
+import copy
 import hashlib
 import importlib.metadata
 import platform
 import random
+import sys
 import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from source_training.deit_data import (
     SourceImageList,
@@ -49,6 +52,15 @@ def autocast_context(device, enabled):
     if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
         return torch.amp.autocast(device_type=device.type, enabled=True)
     return torch.cuda.amp.autocast(enabled=True)
+
+
+def build_grad_scaler(device, enabled):
+    """Return a GradScaler for AMP training, or None when AMP is disabled."""
+    if not enabled:
+        return None
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler(device.type)
+    return torch.cuda.amp.GradScaler()
 
 
 def compute_fixed_class_metrics(
@@ -99,6 +111,21 @@ def compute_fixed_class_metrics(
     }
 
 
+def prefixed_metrics(metrics, prefix):
+    """Apply the established PU/FO names to fixed-class metrics."""
+    return {
+        f"{prefix}-Acc": metrics["Acc"],
+        f"{prefix}-mean-class-Acc": metrics["mean-class-Acc"],
+        f"{prefix}-overall-Acc": metrics["overall-Acc"],
+        f"{prefix}-Acc-per-class": copy.deepcopy(metrics["Acc-per-class"]),
+        f"{prefix}-class-count": copy.deepcopy(metrics["class-count"]),
+        f"{prefix}-worst-class-Acc": metrics["worst-class-Acc"],
+        f"{prefix}-worst-class-id": metrics["worst-class-id"],
+        f"{prefix}-worst-class-name": metrics["worst-class-name"],
+        f"{prefix}-class-std": metrics["class-std"],
+    }
+
+
 def prediction_sha256(indices, labels, predictions):
     digest = hashlib.sha256()
     for name, values in (
@@ -139,12 +166,23 @@ def build_target_loader(config):
     return records, loader
 
 
-def evaluate_model(model, loader, device, *, amp, on_batch=None, progress_label=None):
+def evaluate_model(
+    model,
+    loader,
+    device,
+    *,
+    amp,
+    on_batch=None,
+    progress_label=None,
+    use_tqdm=False,
+):
     """Evaluate one complete loader pass and retain exact sample indices.
 
     When ``progress_label`` is provided, a short flush-buffered progress line
     is printed roughly every 10% of the loader so long runs are observable
-    through the launcher's redirected ``stdout.log``.
+    through the launcher's redirected ``stdout.log``.  When ``use_tqdm`` is
+    set, a streaming tqdm bar replaces those lines and ``progress_label``
+    (if given) becomes the bar description.
     """
     all_labels, all_predictions, all_indices = [], [], []
     model.eval()
@@ -152,8 +190,18 @@ def evaluate_model(model, loader, device, *, amp, on_batch=None, progress_label=
     progress_every = max(1, total_batches // 10)
     started = time.perf_counter()
     samples_seen = 0
+    batches = enumerate(loader, start=1)
+    if use_tqdm:
+        batches = tqdm(
+            batches,
+            total=total_batches,
+            desc=progress_label or "eval",
+            file=sys.stdout,
+            dynamic_ncols=True,
+            mininterval=1.0,
+        )
     with torch.inference_mode():
-        for batch_index, (images, labels, indices) in enumerate(loader, start=1):
+        for batch_index, (images, labels, indices) in batches:
             images = images.to(device, non_blocking=True)
             with autocast_context(device, amp):
                 logits = model(images)
@@ -168,6 +216,7 @@ def evaluate_model(model, loader, device, *, amp, on_batch=None, progress_label=
                 on_batch(batch_index, labels, predictions, indices)
             if (
                 progress_label is not None
+                and not use_tqdm
                 and (
                     batch_index % progress_every == 0
                     or batch_index == total_batches
