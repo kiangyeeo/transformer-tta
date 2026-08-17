@@ -100,6 +100,12 @@ The default result root for both is:
 
 `/home/nas3/biod/wangkangyi/results/transformer_otta_full_dense/`
 
+A lightweight GPU scheduler is available at
+`tools/run_deit_otta_multi_gpu.py`; by default it schedules the seven OTTA
+directions for both variants (14 jobs) across GPUs 0-7 with one subprocess
+per GPU and per-job logs under `<output.root>/launcher_logs/`. It has not
+been launched by Codex.
+
 This root is the implementation default only; it has not been frozen as the
 formal trainable-OTTA output root. The optimizer is frozen in the config as
 AdamW with `lr=1.0e-5`, `betas=[0.9, 0.999]`, `eps=1.0e-8`,

@@ -77,7 +77,7 @@ transformer-tta/
 ├── visda_otta/                  # VisDA 指标和适配辅助代码
 ├── configs/                     # 单次运行配置（含 deit_otta_{full_dense,candidate_dense}.yaml）
 ├── experiments/                 # 实验矩阵
-├── tools/                       # planner、launcher、status、summary
+├── tools/                       # planner、launcher、status、summary（含 run_deit_otta_multi_gpu.py 8 卡调度）
 ├── scripts/                     # 维护脚本
 ├── tests/                       # 合成 smoke/工程测试（含 full-dense CPU 契约）
 ├── TRANSFORMER_GROUP_SPLIT_LBI_PROPOSAL_DOLLAR_MATH.md
