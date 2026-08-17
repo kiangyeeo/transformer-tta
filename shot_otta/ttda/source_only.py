@@ -1,16 +1,9 @@
 """Strict no-adaptation DeiT TTDA evaluation and structured artifacts."""
 
-import hashlib
-import importlib.metadata
 import os.path as osp
-import platform
-import random
 import sys
 import time
-from contextlib import nullcontext
-from datetime import datetime, timezone
 
-import numpy as np
 import torch
 
 from shot_otta.artifacts import (
@@ -22,144 +15,24 @@ from shot_otta.artifacts import (
 )
 from shot_otta.backbones.deit import hash_model_state, load_frozen_deit_source
 from shot_otta.config import dump_yaml
-from shot_otta.ttda.config import experiment_output_root
-from source_training.deit_data import (
-    SourceImageList,
-    build_loader,
-    build_transforms,
-    read_image_records,
+from shot_otta.deit_source_only.config import experiment_output_root
+from shot_otta.deit_source_only.runtime import (
+    ARTIFACT_SCHEMA_VERSION,
+    build_target_loader,
+    compute_fixed_class_metrics,
+    environment_record,
+    evaluate_model,
+    prediction_sha256,
+    require_sequential_complete,
+    set_reproducibility,
+    utc_now,
 )
-
-
-ARTIFACT_SCHEMA_VERSION = 2
-
-
-def _utc_now():
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _package_version(name):
-    try:
-        return importlib.metadata.version(name)
-    except importlib.metadata.PackageNotFoundError:
-        return None
-
-
-def _set_reproducibility(seed, deterministic):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = bool(deterministic)
-    torch.backends.cudnn.benchmark = False
-
-
-def _autocast_context(device, enabled):
-    if not enabled:
-        return nullcontext()
-    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
-        return torch.amp.autocast(device_type=device.type, enabled=True)
-    return torch.cuda.amp.autocast(enabled=True)
-
-
-def compute_fixed_class_metrics(
-    labels,
-    predictions,
-    *,
-    num_classes,
-    class_names,
-):
-    """Compute fixed-denominator macro, overall, and per-class accuracy."""
-    labels = np.asarray(labels, dtype=np.int64).reshape(-1)
-    predictions = np.asarray(predictions, dtype=np.int64).reshape(-1)
-    if labels.shape != predictions.shape:
-        raise ValueError("Labels and predictions must have identical shapes")
-    if len(class_names) != num_classes:
-        raise ValueError("class_names length does not match num_classes")
-    if labels.size == 0:
-        raise ValueError("TTDA evaluation requires at least one target sample")
-    if (
-        np.any(labels < 0)
-        or np.any(labels >= num_classes)
-        or np.any(predictions < 0)
-        or np.any(predictions >= num_classes)
-    ):
-        raise ValueError("Labels or predictions are outside the fixed classes")
-    matrix = np.bincount(
-        num_classes * labels + predictions,
-        minlength=num_classes**2,
-    ).reshape(num_classes, num_classes)
-    counts = matrix.sum(axis=1)
-    missing = np.flatnonzero(counts == 0).tolist()
-    if missing:
-        raise ValueError(f"Target evaluation is missing classes: {missing}")
-    per_class = matrix.diagonal() * 100.0 / counts
-    macro = float(per_class.mean())
-    overall = float(matrix.diagonal().sum() * 100.0 / matrix.sum())
-    worst_id = int(np.argmin(per_class))
-    return {
-        "Acc": macro,
-        "mean-class-Acc": macro,
-        "overall-Acc": overall,
-        "Acc-per-class": per_class.astype(float).tolist(),
-        "class-count": counts.astype(int).tolist(),
-        "worst-class-Acc": float(per_class[worst_id]),
-        "worst-class-id": worst_id,
-        "worst-class-name": class_names[worst_id],
-        "class-std": float(np.std(per_class, ddof=0)),
-    }
-
-
-def _prediction_sha256(indices, labels, predictions):
-    digest = hashlib.sha256()
-    for name, values in (
-        ("indices", indices),
-        ("labels", labels),
-        ("predictions", predictions),
-    ):
-        array = np.asarray(values, dtype=np.int64).reshape(-1)
-        digest.update(name.encode("ascii"))
-        digest.update(array.tobytes(order="C"))
-    return digest.hexdigest()
-
-
-def evaluate_frozen_model(model, loader, device, *, amp):
-    labels, predictions, indices = [], [], []
-    model.eval()
-    with torch.inference_mode():
-        for images, batch_labels, batch_indices in loader:
-            images = images.to(device, non_blocking=True)
-            with _autocast_context(device, amp):
-                logits = model(images)
-            predictions.append(logits.argmax(dim=1).cpu())
-            labels.append(torch.as_tensor(batch_labels).cpu())
-            indices.append(torch.as_tensor(batch_indices).cpu())
-    if not predictions:
-        raise RuntimeError("Target loader produced no batches")
-    return (
-        torch.cat(labels).numpy(),
-        torch.cat(predictions).numpy(),
-        torch.cat(indices).numpy(),
-    )
-
-
-def _environment_record(device, amp_effective):
-    return {
-        "python": platform.python_version(),
-        "platform": platform.platform(),
-        "torch": torch.__version__,
-        "torchvision": _package_version("torchvision"),
-        "timm": _package_version("timm"),
-        "safetensors": _package_version("safetensors"),
-        "cuda": torch.version.cuda,
-        "device": str(device),
-        "amp_effective": bool(amp_effective),
-    }
 
 
 def run_source_only_experiment(config, project_root, *, model_factory=None):
     """Evaluate one source checkpoint without any adaptation side effects."""
+    if config.get("task") != "ttda":
+        raise ValueError("DeiT TTDA runner requires task=ttda")
     output_root = experiment_output_root(config)
     run_id, output_dir = create_run_dir(
         output_root,
@@ -173,7 +46,7 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
         "summary": osp.join(output_dir, "summary.json"),
     }
     dump_yaml(paths["config"], config)
-    started_at = _utc_now()
+    started_at = utc_now()
     timer = time.perf_counter()
     base_manifest = {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
@@ -227,7 +100,7 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
         amp_effective = bool(
             config["evaluation"]["amp"] and device.type == "cuda"
         )
-        _set_reproducibility(
+        set_reproducibility(
             config["seed"], config["evaluation"]["deterministic"]
         )
         model, checkpoint_metadata = load_frozen_deit_source(
@@ -237,38 +110,14 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
         )
         state_before = hash_model_state(model)
 
-        records = read_image_records(
-            config["data"]["target_list"],
-            config["data"]["num_classes"],
-        )
-        _, transform = build_transforms(
-            {
-                **config["preprocessing"],
-                "horizontal_flip_probability": 0.0,
-            }
-        )
-        dataset = SourceImageList(records, range(len(records)), transform)
-        loader = build_loader(
-            dataset,
-            batch_size=config["evaluation"]["batch_size"],
-            workers=config["evaluation"]["workers"],
-            shuffle=False,
-            seed=config["seed"],
-            pin_memory=(
-                config["evaluation"]["pin_memory"] and device.type == "cuda"
-            ),
-        )
-        labels, predictions, indices = evaluate_frozen_model(
+        records, loader = build_target_loader(config)
+        labels, predictions, indices = evaluate_model(
             model,
             loader,
             device,
             amp=amp_effective,
         )
-        expected_indices = np.arange(len(records), dtype=np.int64)
-        if not np.array_equal(indices, expected_indices):
-            raise RuntimeError(
-                "TTDA target samples were skipped, duplicated, or reordered"
-            )
+        require_sequential_complete(indices, len(records), protocol="TTDA")
         state_after = hash_model_state(model)
         if state_before != state_after:
             raise RuntimeError("Source-only evaluation modified model state")
@@ -288,7 +137,7 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
             if device.type == "cuda"
             else 0
         )
-        completed_at = _utc_now()
+        completed_at = utc_now()
         invariant_record = {
             "adaptation_steps": 0,
             "optimizer_created": False,
@@ -300,7 +149,7 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
             "model_state_sha256_before": state_before,
             "model_state_sha256_after": state_after,
             "model_state_unchanged": True,
-            "prediction_sha256": _prediction_sha256(
+            "prediction_sha256": prediction_sha256(
                 indices, labels, predictions
             ),
             "processed_sample_count": int(labels.size),
@@ -358,7 +207,7 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
             **invariant_record,
             "runtime": runtime,
             "peak_gpu_memory_bytes": peak_memory,
-            "environment": _environment_record(device, amp_effective),
+            "environment": environment_record(device, amp_effective),
         }
         dump_json(paths["summary"], summary)
         dump_json(
@@ -402,7 +251,7 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
                 "error_type": type(error).__name__,
                 "error": str(error),
                 "started_at_utc": started_at,
-                "completed_at_utc": _utc_now(),
+                "completed_at_utc": utc_now(),
             },
         )
         raise

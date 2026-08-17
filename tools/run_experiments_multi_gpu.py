@@ -126,6 +126,10 @@ def signal_handler(signum, _frame):
 def execute(plan, runs_root, logs_root, gpus, workdir, dry_run=False, summarize_after_run=False, command_history=None, process_executor=None, workers_per_gpu=1, max_workers=None, resume_partial_runs=False):
     """Run plan; process_executor is intentionally injectable for CPU smoke tests."""
     if workers_per_gpu < 1: raise ValueError('workers_per_gpu must be positive')
+    if resume_partial_runs and plan.get('supports_stream_resume') is False:
+        raise ValueError('This plan does not support --resume-partial-runs')
+    if summarize_after_run and plan.get('supports_generic_summary') is False:
+        raise ValueError('This plan requires its task-specific summary tool; do not use --summarize-after-run')
     validate_visda_batch_size(plan)
     process_executor = process_executor or default_executor
     slots=[(gpu, index) for gpu in gpus for index in range(workers_per_gpu)]; slots=slots[:min(len(slots), max_workers if max_workers is not None else len(slots))]

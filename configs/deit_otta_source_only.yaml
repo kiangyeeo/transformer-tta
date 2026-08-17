@@ -41,7 +41,7 @@ metrics:
   class_denominator: fixed_dataset_classes
   report_overall: true
   report_per_class: true
-  final_prediction_policy: reuse_when_state_unchanged
+  final_prediction_policy: independent_full_target_pass
 
 output:
   root: /home/nas3/biod/wangkangyi/results/transformer_otta_source_only/runs

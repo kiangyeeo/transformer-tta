@@ -15,7 +15,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from tools.check_experiment_status import check_status, load_plan  # noqa: E402
-from shot_otta.ttda.config import VISDA_CLASS_NAMES  # noqa: E402
+from shot_otta.deit_source_only.config import VISDA_CLASS_NAMES  # noqa: E402
 
 
 METRIC_FIELDS = (

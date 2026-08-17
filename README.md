@@ -50,7 +50,7 @@ scripts/                 Maintenance utilities
 tests/                   Synthetic smoke and engineering tests
 ```
 
-The reusable pieces include the SHOT objective, image-list data pipeline, artifact system, experiment planning and launch infrastructure, summaries, and the broad LBI stage lifecycle. The strict local DeiT adapter, Transformer-aware identities, and zero-adaptation TTDA/OTTA evaluators are implemented. Transformer structural groups, group proximal operators, matched selectors, trainable OTTA, and trainable TTDA remain future work.
+The reusable pieces include the SHOT objective, image-list data pipeline, artifact system, experiment planning and launch infrastructure, summaries, and the broad LBI stage lifecycle. The strict local DeiT adapter, protocol-neutral source-only runtime, Transformer-aware identities, and zero-adaptation TTDA/OTTA evaluators are implemented. Transformer structural groups, group proximal operators, matched selectors, trainable OTTA, and trainable TTDA remain future work.
 
 ## Installation
 
@@ -131,8 +131,8 @@ dataset. It creates no optimizer, computes no adaptation loss, performs no
 backward pass, and uses one full-target prediction pass. Fixed-class macro
 accuracy is reported as `Acc`; overall and per-class accuracies are also
 recorded. The evaluator verifies that the complete model state hash is
-unchanged. PU/FO remain specific to the legacy streaming OTTA protocol and are
-not duplicated into this TTDA control.
+unchanged. PU/FO remain specific to the streaming OTTA protocol and are not
+duplicated into this TTDA control.
 
 The final report contains the seven transfer-level rows plus the Office-31
 six-direction average. VisDA-C additionally expands all 12 canonical classes
@@ -203,11 +203,16 @@ traverses each target domain as one ordered batch stream. Every batch produces
 an `online_batch` artifact, state is carried to the next batch, and a final
 size-one batch is retained. No optimizer, loss, backward call, or parameter
 update is allowed. `PU-Acc` summarizes predictions made during the stream;
-`FO-Acc` uses the final-model evaluation semantics. Because this control keeps
-`W_T == W_0`, FO reuses the exact stream predictions and PU/FO must be bitwise
-consistent. A trainable OTTA method will intentionally remove that equality.
+`FO-Acc` is computed by freezing the final stream model and executing a second,
+independent full-target evaluation pass. Because this control keeps
+`W_T == W_0`, the independently produced PU/FO predictions and metrics must be
+exactly equal. A trainable OTTA method may intentionally remove that equality.
 
 Generate and dry-run the seven-task DeiT OTTA plan:
+
+Always regenerate this plan after changing protocol code. The independent FO
+pass is part of the experiment identity, so an older prediction-reuse plan is
+intentionally rejected.
 
 ```bash
 export PROJECT_ROOT=/home/nas3/biod/wangkangyi/transformer-tta

@@ -76,10 +76,12 @@ The new DeiT source-only OTTA control uses the separate default result root:
 It runs the same six Office-31 directions and VisDA-C train-to-validation task
 as an ordered target stream. It records every incoming batch, retains a
 size-one tail batch, and reports macro-per-class `PU-Acc` and `FO-Acc` plus
-overall and per-class metrics. Zero adaptation means the final model is still
-`W0`, so the implementation reuses predictions and requires PU/FO and the
-before/after model hashes to match exactly. No real OTTA evaluation has been
-launched by Codex. Trainable DeiT OTTA remains unimplemented.
+overall and per-class metrics. FO is a separate full-target prediction pass
+after the stream, matching the final-offline protocol. Zero adaptation means
+the final model is still `W0`, so the implementation requires the independent
+PU/FO predictions and the before/after model hashes to match exactly. No real
+OTTA evaluation has been launched by Codex. Trainable DeiT OTTA remains
+unimplemented.
 
 ## Server Boundary
 

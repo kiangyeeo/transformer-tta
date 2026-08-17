@@ -392,7 +392,8 @@ def build_deit_otta_source_only_identity(config):
             "amp": bool(evaluation["amp"]),
             "deterministic": bool(evaluation["deterministic"]),
             "stream_prediction_passes": 1,
-            "final_prediction_policy": "reuse_when_state_unchanged",
+            "fo_prediction_passes": 1,
+            "final_prediction_policy": "independent_full_target_pass",
         },
         "metrics": copy.deepcopy(config["metrics"]),
         "adaptation": {

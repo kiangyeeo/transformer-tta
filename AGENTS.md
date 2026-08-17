@@ -64,6 +64,9 @@ transformer-tta/
 ├── train_source_deit.py         # DeiT-S source-domain 训练统一入口
 ├── experiment_identity.py       # legacy FC 与 DeiT TTDA/OTTA source-only 实验身份
 ├── shot_otta/                   # 数据、模型、loss、trainer、artifact
+│   ├── deit_source_only/         # DeiT 零适配公共 config/runtime/CLI 基础设施
+│   ├── otta/                     # DeiT OTTA 协议生命周期
+│   └── ttda/                     # DeiT TTDA 协议生命周期与兼容入口
 ├── core/lbi/                    # 逐元素 Split-LBI engine/state/diagnostics
 ├── source_training/             # SHOT 风格 ResNet/VGG source trainer
 │   ├── deit_config.py           # Transformer source 协议校验与路径解析
@@ -300,7 +303,7 @@ temporary:     /home/nas3/biod/wangkangyi/tmp/
 - `tau`、`lambda`、LBI step size、max steps、到达 budget 的实际 steps；
 - 本次实验选定的 `delta_semantics`（例如 `legacy_dense_init` 或 `strict_masked_delta`）；
 - optimizer、LR、weight decay、batch size、AMP、model mode policy；
-- 指标口径：OTTA 记录 PU/FO，TTDA source-only 只记录单次完整 target 的 `Acc`；VisDA-C 必须同时展开 12 类具体准确率并验证其均值等于 macro `Acc`；同时记录 peak GPU memory、wall time；
+- 指标口径：OTTA 第一遍顺序 stream 记录 post-update PU，流结束后冻结最终模型并以独立第二遍完整 target 推理记录 FO；TTDA source-only 只记录单次完整 target 的 `Acc`；VisDA-C 必须同时展开 12 类具体准确率并验证其均值等于 macro 指标；同时记录 peak GPU memory、wall time；
 - Office overall 与 macro-per-class 的明确区别；VisDA 使用 12-class macro-per-class。
 
 先做最小 pilot：Office `A -> D` 与 VisDA `train -> validation`、一个 seed、OTTA、三个主 budget；先跑 Source-only、Full-dense、Candidate-dense，再跑 selectors。对一个代表任务做 paired-vs-independent。pilot 可以用 target accuracy 做工程 go/no-go 检查，但这不自动构成无偏的超参选择。展开正式矩阵前必须冻结 validation protocol：使用独立验证依据，或预先承诺报告全部 budgets；若沿用 target benchmark accuracy 选主 budget，则必须明确标为 oracle-style selection，不能同时声称 labels 只用于最终一次评估。
@@ -309,7 +312,7 @@ temporary:     /home/nas3/biod/wangkangyi/tmp/
 
 ## 12. 测试门槛
 
-原有 smoke/engineering 脚本在 2026-08-14 审计时强制 CPU 均通过；`tests/deit_source_training_test.py` 覆盖 source trainer，`tests/deit_ttda_source_only_test.py` 以 fake DeiT、31 类合成图片和临时 manifests 覆盖零适配、固定类指标、尾批、七任务 planner、checkpoint 合约与汇总。真实 timm checkpoint forward 与 CUDA 评测只允许在服务器环境验证。Windows PowerShell：
+原有 smoke/engineering 脚本在 2026-08-14 审计时强制 CPU 均通过；`tests/deit_source_training_test.py` 覆盖 source trainer；`tests/deit_ttda_source_only_test.py` 与 `tests/deit_otta_source_only_test.py` 共享协议中立 fixture，以 fake DeiT、31 类合成图片和临时 manifests 覆盖零适配、固定类指标、尾批、七任务 planner、checkpoint 合约与汇总。OTTA 测试还必须用 forward-call 计数证明 PU stream 与 FO full-target 是两次独立推理。真实 timm checkpoint forward 与 CUDA 评测只允许在服务器环境验证。Windows PowerShell：
 
 ```powershell
 $env:CUDA_VISIBLE_DEVICES='-1'

@@ -17,21 +17,17 @@ from shot_otta.artifacts import (
 )
 from shot_otta.backbones.deit import hash_model_state, load_frozen_deit_source
 from shot_otta.config import dump_yaml
-from shot_otta.ttda.config import experiment_output_root
-from shot_otta.ttda.source_only import (
+from shot_otta.deit_source_only.config import experiment_output_root
+from shot_otta.deit_source_only.runtime import (
     ARTIFACT_SCHEMA_VERSION,
-    _autocast_context,
-    _environment_record,
-    _prediction_sha256,
-    _set_reproducibility,
-    _utc_now,
+    build_target_loader,
     compute_fixed_class_metrics,
-)
-from source_training.deit_data import (
-    SourceImageList,
-    build_loader,
-    build_transforms,
-    read_image_records,
+    environment_record,
+    evaluate_model,
+    prediction_sha256,
+    require_sequential_complete,
+    set_reproducibility,
+    utc_now,
 )
 
 
@@ -48,39 +44,6 @@ def _prefixed_metrics(metrics, prefix):
         f"{prefix}-worst-class-name": metrics["worst-class-name"],
         f"{prefix}-class-std": metrics["class-std"],
     }
-
-
-def evaluate_source_only_stream(
-    model,
-    loader,
-    device,
-    *,
-    amp,
-    on_batch=None,
-):
-    """Run one ordered stream pass, keeping every batch including size one."""
-    all_labels, all_predictions, all_indices = [], [], []
-    model.eval()
-    with torch.inference_mode():
-        for stream_batch, (images, labels, indices) in enumerate(loader, start=1):
-            images = images.to(device, non_blocking=True)
-            with _autocast_context(device, amp):
-                logits = model(images)
-            predictions = logits.argmax(dim=1).cpu()
-            labels = torch.as_tensor(labels).cpu()
-            indices = torch.as_tensor(indices).cpu()
-            all_predictions.append(predictions)
-            all_labels.append(labels)
-            all_indices.append(indices)
-            if on_batch is not None:
-                on_batch(stream_batch, labels, predictions, indices)
-    if not all_predictions:
-        raise RuntimeError("Target stream produced no batches")
-    return (
-        torch.cat(all_labels).numpy(),
-        torch.cat(all_predictions).numpy(),
-        torch.cat(all_indices).numpy(),
-    )
 
 
 def run_source_only_otta_experiment(config, project_root, *, model_factory=None):
@@ -100,7 +63,7 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
         "summary": osp.join(output_dir, "summary.json"),
     }
     dump_yaml(paths["config"], config)
-    started_at = _utc_now()
+    started_at = utc_now()
     timer = time.perf_counter()
     base_manifest = {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
@@ -154,7 +117,7 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
         else:
             device = torch.device("cpu")
         amp_effective = bool(config["evaluation"]["amp"] and device.type == "cuda")
-        _set_reproducibility(
+        set_reproducibility(
             config["seed"], config["evaluation"]["deterministic"]
         )
         model, checkpoint_metadata = load_frozen_deit_source(
@@ -164,27 +127,7 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
         )
         state_before = hash_model_state(model)
 
-        records = read_image_records(
-            config["data"]["target_list"],
-            config["data"]["num_classes"],
-        )
-        _, transform = build_transforms(
-            {
-                **config["preprocessing"],
-                "horizontal_flip_probability": 0.0,
-            }
-        )
-        dataset = SourceImageList(records, range(len(records)), transform)
-        loader = build_loader(
-            dataset,
-            batch_size=config["evaluation"]["batch_size"],
-            workers=config["evaluation"]["workers"],
-            shuffle=False,
-            seed=config["seed"],
-            pin_memory=(
-                config["evaluation"]["pin_memory"] and device.type == "cuda"
-            ),
-        )
+        records, loader = build_target_loader(config)
 
         batch_sample_counts = []
 
@@ -193,7 +136,7 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
             batch_accuracy = float(
                 (predictions == labels).to(torch.float32).mean().item() * 100.0
             )
-            batch_prediction_sha256 = _prediction_sha256(
+            batch_prediction_sha256 = prediction_sha256(
                 indices.numpy(), labels.numpy(), predictions.numpy()
             )
             append_jsonl(
@@ -222,41 +165,78 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
                 },
             )
 
-        labels, predictions, indices = evaluate_source_only_stream(
+        pu_labels, pu_predictions, pu_indices = evaluate_model(
             model,
             loader,
             device,
             amp=amp_effective,
             on_batch=record_batch,
         )
-        expected_indices = np.arange(len(records), dtype=np.int64)
-        if not np.array_equal(indices, expected_indices):
-            raise RuntimeError(
-                "OTTA target samples were skipped, duplicated, or reordered"
-            )
-        state_after = hash_model_state(model)
-        if state_before != state_after:
+        require_sequential_complete(
+            pu_indices, len(records), protocol="OTTA PU stream"
+        )
+        state_after_stream = hash_model_state(model)
+        if state_before != state_after_stream:
             raise RuntimeError("Source-only OTTA stream modified model state")
         if any(parameter.grad is not None for parameter in model.parameters()):
             raise RuntimeError("Source-only OTTA unexpectedly created gradients")
 
-        base_metrics = compute_fixed_class_metrics(
-            labels,
-            predictions,
-            num_classes=config["data"]["num_classes"],
-            class_names=config["data"]["class_names"],
+        # FO follows the paper protocol: freeze W_T after the stream, then run
+        # a separate complete target-set evaluation pass.  For source-only,
+        # W_T == W_0 and the two prediction arrays must still match exactly.
+        fo_labels, fo_predictions, fo_indices = evaluate_model(
+            model,
+            loader,
+            device,
+            amp=amp_effective,
         )
-        pu_metrics = _prefixed_metrics(base_metrics, "PU")
-        # W_T == W_0, so a separate full-target inference would be identical.
-        # Reusing the exact stream predictions makes the control invariant
-        # explicit and avoids a redundant second prediction pass.
-        fo_metrics = _prefixed_metrics(base_metrics, "FO")
-        pu_fo_equal = all(
+        require_sequential_complete(
+            fo_indices, len(records), protocol="OTTA FO evaluation"
+        )
+        state_after_fo = hash_model_state(model)
+        if state_after_stream != state_after_fo:
+            raise RuntimeError("OTTA FO evaluation modified final model state")
+        if not np.array_equal(pu_indices, fo_indices) or not np.array_equal(
+            pu_labels, fo_labels
+        ):
+            raise RuntimeError("OTTA PU and FO evaluated different target samples")
+
+        metric_kwargs = {
+            "num_classes": config["data"]["num_classes"],
+            "class_names": config["data"]["class_names"],
+        }
+        pu_base_metrics = compute_fixed_class_metrics(
+            pu_labels,
+            pu_predictions,
+            **metric_kwargs,
+        )
+        fo_base_metrics = compute_fixed_class_metrics(
+            fo_labels,
+            fo_predictions,
+            **metric_kwargs,
+        )
+        pu_metrics = _prefixed_metrics(pu_base_metrics, "PU")
+        fo_metrics = _prefixed_metrics(fo_base_metrics, "FO")
+        pu_fo_predictions_equal = np.array_equal(
+            pu_predictions, fo_predictions
+        )
+        if not pu_fo_predictions_equal:
+            raise RuntimeError("Source-only OTTA PU and FO predictions differ")
+        pu_fo_metrics_equal = all(
             pu_metrics[key] == fo_metrics[key.replace("PU-", "FO-", 1)]
             for key in pu_metrics
         )
-        if not pu_fo_equal:
+        if not pu_fo_metrics_equal:
             raise RuntimeError("Source-only OTTA PU and FO metrics differ")
+
+        pu_prediction_sha256 = prediction_sha256(
+            pu_indices, pu_labels, pu_predictions
+        )
+        fo_prediction_sha256 = prediction_sha256(
+            fo_indices, fo_labels, fo_predictions
+        )
+        if pu_prediction_sha256 != fo_prediction_sha256:
+            raise RuntimeError("Source-only OTTA PU and FO prediction hashes differ")
 
         runtime = float(time.perf_counter() - timer)
         peak_memory = (
@@ -264,8 +244,7 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
             if device.type == "cuda"
             else 0
         )
-        completed_at = _utc_now()
-        prediction_sha256 = _prediction_sha256(indices, labels, predictions)
+        completed_at = utc_now()
         invariant_record = {
             "adaptation_steps": 0,
             "adaptation_steps_per_batch": 0,
@@ -273,19 +252,26 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
             "loss_computed": False,
             "backward_calls": 0,
             "target_labels_usage": "evaluation_only",
+            "prediction_passes": 2,
             "stream_prediction_passes": 1,
-            "fo_prediction_passes": 0,
-            "fo_predictions_reused": True,
-            "fo_reuse_reason": "model_state_unchanged",
+            "fo_prediction_passes": 1,
+            "fo_predictions_reused": False,
+            "fo_evaluation_scope": "full_target_dataset",
             "PU-equals-FO": True,
+            "PU-predictions-equal-FO": True,
             "model_state_sha256_before": state_before,
-            "model_state_sha256_after": state_after,
+            "model_state_sha256_after_stream": state_after_stream,
+            "model_state_sha256_after_fo": state_after_fo,
+            "model_state_sha256_after": state_after_fo,
             "model_state_unchanged": True,
-            "prediction_sha256": prediction_sha256,
-            "PU-prediction-sha256": prediction_sha256,
-            "FO-prediction-sha256": prediction_sha256,
-            "processed_sample_count": int(labels.size),
+            "PU-prediction-sha256": pu_prediction_sha256,
+            "FO-prediction-sha256": fo_prediction_sha256,
+            "processed_sample_count": int(pu_labels.size),
+            "stream_processed_sample_count": int(pu_labels.size),
+            "fo_processed_sample_count": int(fo_labels.size),
             "target_batch_count": int(len(loader)),
+            "stream_batch_count": int(len(loader)),
+            "fo_batch_count": int(len(loader)),
             "tail_batch_size": batch_sample_counts[-1],
             "tail_batch_size_one_policy": "kept",
             "drop_last": False,
@@ -341,7 +327,7 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
             **invariant_record,
             "runtime": runtime,
             "peak_gpu_memory_bytes": peak_memory,
-            "environment": _environment_record(device, amp_effective),
+            "environment": environment_record(device, amp_effective),
         }
         dump_json(paths["summary"], summary)
         dump_json(
@@ -384,7 +370,7 @@ def run_source_only_otta_experiment(config, project_root, *, model_factory=None)
                 "error_type": type(error).__name__,
                 "error": str(error),
                 "started_at_utc": started_at,
-                "completed_at_utc": _utc_now(),
+                "completed_at_utc": utc_now(),
             },
         )
         raise

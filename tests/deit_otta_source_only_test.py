@@ -9,6 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import torch
+
 
 PROJECT_ROOT = osp.dirname(osp.dirname(osp.abspath(__file__)))
 TEST_ROOT = osp.dirname(osp.abspath(__file__))
@@ -16,13 +18,13 @@ for path in (PROJECT_ROOT, TEST_ROOT):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from deit_ttda_source_only_test import (  # noqa: E402
-    _install_real_fake_checkpoint,
-    _prepare_assets,
-    tiny_factory,
+from deit_source_only_fixtures import (  # noqa: E402
+    TinyDeiT,
+    install_real_fake_checkpoint,
+    prepare_assets,
 )
 from shot_otta.otta.source_only import run_source_only_otta_experiment  # noqa: E402
-from shot_otta.ttda.config import (  # noqa: E402
+from shot_otta.deit_source_only.config import (  # noqa: E402
     VISDA_CLASS_NAMES,
     load_yaml,
     resolve_config,
@@ -40,26 +42,45 @@ MATRIX_PATH = osp.join(
 )
 
 
+class CountingTinyDeiT(TinyDeiT):
+    total_forward_calls = 0
+
+    def forward(self, images):
+        type(self).total_forward_calls += 1
+        return super().forward(images)
+
+
+def counting_tiny_factory(model_name, **kwargs):
+    assert model_name == "deit_small_patch16_224.fb_in1k"
+    return CountingTinyDeiT(**kwargs)
+
+
+class DriftingTinyDeiT(TinyDeiT):
+    total_forward_calls = 0
+
+    def forward(self, images):
+        type(self).total_forward_calls += 1
+        logits = super().forward(images)
+        if type(self).total_forward_calls > 2:
+            logits = torch.roll(logits, shifts=1, dims=1)
+        return logits
+
+
+def drifting_tiny_factory(model_name, **kwargs):
+    assert model_name == "deit_small_patch16_224.fb_in1k"
+    return DriftingTinyDeiT(**kwargs)
+
+
 def _otta_base(root):
-    prepared = _prepare_assets(root)
-    config = load_yaml(CONFIG_PATH)
-    config["data"]["list_root"] = prepared["data"]["list_root"]
-    config["model"]["source_checkpoint_root"] = prepared["model"][
-        "source_checkpoint_root"
-    ]
-    config["device"] = {"type": "cpu", "gpu_id": "0"}
-    config["evaluation"].update(
-        {"batch_size": 30, "workers": 0, "amp": False, "pin_memory": False}
-    )
-    config["output"]["root"] = str((Path(root) / "otta_runs").resolve())
-    return config
+    return prepare_assets(root, CONFIG_PATH, runs_directory="otta_runs")
 
 
 def _check_end_to_end(root, base):
-    _install_real_fake_checkpoint(root)
+    install_real_fake_checkpoint(root)
     effective = resolve_config(base, PROJECT_ROOT, expected_task="otta")
+    CountingTinyDeiT.total_forward_calls = 0
     summary = run_source_only_otta_experiment(
-        effective, PROJECT_ROOT, model_factory=tiny_factory
+        effective, PROJECT_ROOT, model_factory=counting_tiny_factory
     )
     expected = 100.0 / 31.0
     assert math.isclose(summary["PU-Acc"], expected)
@@ -75,10 +96,22 @@ def _check_end_to_end(root, base):
     assert summary["optimizer_created"] is False
     assert summary["backward_calls"] == 0
     assert summary["stream_prediction_passes"] == 1
-    assert summary["fo_prediction_passes"] == 0
-    assert summary["fo_predictions_reused"] is True
+    assert summary["fo_prediction_passes"] == 1
+    assert summary["prediction_passes"] == 2
+    assert summary["fo_predictions_reused"] is False
+    assert summary["fo_evaluation_scope"] == "full_target_dataset"
     assert summary["PU-equals-FO"] is True
+    assert summary["PU-predictions-equal-FO"] is True
     assert summary["model_state_unchanged"] is True
+    assert summary["model_state_sha256_before"] == summary[
+        "model_state_sha256_after_stream"
+    ]
+    assert summary["model_state_sha256_after_stream"] == summary[
+        "model_state_sha256_after_fo"
+    ]
+    assert summary["stream_processed_sample_count"] == 31
+    assert summary["fo_processed_sample_count"] == 31
+    assert CountingTinyDeiT.total_forward_calls == 4
     output = Path(summary["output_dir"])
     metrics = [
         json.loads(line)
@@ -95,6 +128,26 @@ def _check_end_to_end(root, base):
         False,
     ]
     return effective, summary
+
+
+def _check_independent_fo_mismatch_is_rejected(base):
+    mismatch_config = copy.deepcopy(base)
+    mismatch_config["output"]["root"] += "_fo_mismatch"
+    effective = resolve_config(
+        mismatch_config, PROJECT_ROOT, expected_task="otta"
+    )
+    DriftingTinyDeiT.total_forward_calls = 0
+    try:
+        run_source_only_otta_experiment(
+            effective,
+            PROJECT_ROOT,
+            model_factory=drifting_tiny_factory,
+        )
+    except RuntimeError as error:
+        assert "PU and FO predictions differ" in str(error), str(error)
+    else:
+        raise AssertionError("Independent FO mismatch was not rejected")
+    assert DriftingTinyDeiT.total_forward_calls == 4
 
 
 def _fake_summary(experiment, template, index):
@@ -131,6 +184,8 @@ def _fake_summary(experiment, template, index):
             "runtime": float(index + 1),
             "peak_gpu_memory_bytes": index,
             "model_state_sha256_before": "a" * 64,
+            "model_state_sha256_after_stream": "a" * 64,
+            "model_state_sha256_after_fo": "a" * 64,
             "model_state_sha256_after": "a" * 64,
             "PU-prediction-sha256": "b" * 64,
             "FO-prediction-sha256": "b" * 64,
@@ -157,7 +212,20 @@ def _check_plan_and_summary(root, base, template):
     plan = build_plan(load_yaml(MATRIX_PATH), base, CONFIG_PATH, MATRIX_PATH)
     assert plan["experiment_count"] == 7
     assert plan["task"] == "otta"
+    assert plan["supports_stream_resume"] is False
+    assert plan["supports_generic_summary"] is False
     assert all(entry["task"] == "otta" for entry in plan["experiments"])
+    assert all(
+        entry["scientific_config"]["evaluation"] == {
+            "batch_size": 30,
+            "amp": False,
+            "deterministic": True,
+            "stream_prediction_passes": 1,
+            "fo_prediction_passes": 1,
+            "final_prediction_policy": "independent_full_target_pass",
+        }
+        for entry in plan["experiments"]
+    )
     assert all(
         "evaluate_deit_otta.py" in " ".join(entry["command_args"])
         for entry in plan["experiments"]
@@ -228,9 +296,10 @@ def _check_protocol_identity_separation(base):
 def main():
     with tempfile.TemporaryDirectory(prefix="deit_otta_source_only_") as root:
         base = _otta_base(root)
-        _install_real_fake_checkpoint(root)
+        install_real_fake_checkpoint(root)
         _check_protocol_identity_separation(base)
         _, summary = _check_end_to_end(root, base)
+        _check_independent_fo_mismatch_is_rejected(base)
         _check_plan_and_summary(root, base, summary)
     print("DeiT OTTA source-only tests passed")
     return 0

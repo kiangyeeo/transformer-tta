@@ -408,6 +408,11 @@ def run_launcher(
 ):
     if max_experiments is not None and max_experiments <= 0:
         raise ValueError("max_experiments must be greater than 0")
+    if summarize_after_run and plan.get("supports_generic_summary") is False:
+        raise ValueError(
+            "This plan requires its task-specific summary tool; "
+            "do not use --summarize-after-run"
+        )
     runs_root = Path(runs_root).resolve()
     workdir = Path(workdir or Path.cwd()).resolve()
     logs_root = Path(

@@ -14,7 +14,7 @@ PROJECT_ROOT = osp.dirname(osp.dirname(osp.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from shot_otta.ttda.config import VISDA_CLASS_NAMES  # noqa: E402
+from shot_otta.deit_source_only.config import VISDA_CLASS_NAMES  # noqa: E402
 from tools.check_experiment_status import check_status, load_plan  # noqa: E402
 
 
@@ -76,8 +76,13 @@ def _validate_summary(experiment, summary, path):
         "backward_calls": 0,
         "target_labels_usage": "evaluation_only",
         "model_state_unchanged": True,
-        "fo_predictions_reused": True,
+        "prediction_passes": 2,
+        "stream_prediction_passes": 1,
+        "fo_prediction_passes": 1,
+        "fo_predictions_reused": False,
+        "fo_evaluation_scope": "full_target_dataset",
         "PU-equals-FO": True,
+        "PU-predictions-equal-FO": True,
         "drop_last": False,
         "tail_batch_size_one_policy": "kept",
     }
@@ -96,6 +101,14 @@ def _validate_summary(experiment, summary, path):
         "model_state_sha256_after"
     ):
         raise RuntimeError(f"Model state hash changed in {path}")
+    if summary.get("model_state_sha256_before") != summary.get(
+        "model_state_sha256_after_stream"
+    ):
+        raise RuntimeError(f"Model state changed during PU stream in {path}")
+    if summary.get("model_state_sha256_after_stream") != summary.get(
+        "model_state_sha256_after_fo"
+    ):
+        raise RuntimeError(f"Model state changed during FO evaluation in {path}")
     if summary.get("PU-prediction-sha256") != summary.get(
         "FO-prediction-sha256"
     ):
@@ -256,7 +269,11 @@ def _markdown(report_rows, visda_classwise):
     lines.extend(
         [
             "",
-            "Source-only has zero adaptation steps, so PU and FO must be identical.",
+            (
+                "PU comes from the ordered online stream; FO comes from an "
+                "independent full-target pass with the frozen final model. "
+                "Source-only has zero adaptation steps, so they must match."
+            ),
             "",
             "## VisDA-C per-class PU/FO accuracy",
             "",
