@@ -399,6 +399,21 @@ def _check_plan_and_summary(root, base):
                 "seed": experiment["seed"],
                 "Acc": macro,
                 "overall-Acc": overall,
+                "class-names": (
+                    list(VISDA_CLASS_NAMES)
+                    if experiment["dataset"] == "visda-c"
+                    else None
+                ),
+                "Acc-per-class": (
+                    [macro] * 12
+                    if experiment["dataset"] == "visda-c"
+                    else None
+                ),
+                "class-count": (
+                    [1] * 12
+                    if experiment["dataset"] == "visda-c"
+                    else None
+                ),
                 "adaptation_steps": 0,
                 "optimizer_created": False,
                 "loss_computed": False,
@@ -423,10 +438,27 @@ def _check_plan_and_summary(root, base):
     assert report["experiment_count"] == 7
     assert len(report["report_rows"]) == 8
     assert report["office31_six_direction_average"]["Acc"] == 12.5
+    assert len(report["visda_classwise"]) == 12
+    assert report["visda_classwise"][0] == {
+        "class_id": 0,
+        "class_name": "aeroplane",
+        "Acc": 16.0,
+        "sample_count": 1,
+    }
     report_output = Path(root) / "report"
     write_report(report, report_output)
-    for name in ("report.json", "per_transfer.csv", "report.csv", "report.md"):
+    for name in (
+        "report.json",
+        "per_transfer.csv",
+        "report.csv",
+        "report.md",
+        "visda_classwise.csv",
+        "visda_classwise_wide.csv",
+    ):
         assert (report_output / name).is_file()
+    markdown = (report_output / "report.md").read_text(encoding="utf-8")
+    assert "VisDA-C per-class accuracy" in markdown
+    assert "aeroplane" in markdown and "truck" in markdown
     duplicate = fake_runs / "duplicate"
     duplicate.mkdir()
     first = fake_runs / "run-0" / "summary.json"

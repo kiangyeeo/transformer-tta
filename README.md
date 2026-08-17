@@ -132,6 +132,12 @@ recorded. The evaluator verifies that the complete model state hash is
 unchanged. PU/FO remain specific to the legacy streaming OTTA protocol and are
 not duplicated into this TTDA control.
 
+The final report contains the seven transfer-level rows plus the Office-31
+six-direction average. VisDA-C additionally expands all 12 canonical classes
+into `visda_classwise.csv`, `visda_classwise_wide.csv`, and a classwise section
+of `report.md`; its reported `Acc` is the arithmetic mean of those 12 class
+accuracies, while `overall-Acc` is sample-weighted.
+
 Prepare the environment and generate the fixed seven-task plan:
 
 ```bash

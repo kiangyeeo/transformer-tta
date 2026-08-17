@@ -15,6 +15,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from tools.check_experiment_status import check_status, load_plan  # noqa: E402
+from shot_otta.ttda.config import VISDA_CLASS_NAMES  # noqa: E402
 
 
 METRIC_FIELDS = (
@@ -36,6 +37,7 @@ ROW_FIELDS = (
     "experiment_key",
     "summary_path",
 )
+VISDA_CLASSWISE_FIELDS = ("class_id", "class_name", "Acc", "sample_count")
 
 
 def _load_json(path):
@@ -82,6 +84,36 @@ def _validate_summary(summary, experiment, path):
             raise ValueError(f"Summary metric {metric} is missing: {path}")
 
 
+def _visda_classwise_rows(summary, path):
+    class_names = summary.get("class-names")
+    per_class = summary.get("Acc-per-class")
+    class_counts = summary.get("class-count")
+    if class_names != list(VISDA_CLASS_NAMES):
+        raise ValueError(f"VisDA class names/order mismatch: {path}")
+    if not isinstance(per_class, list) or len(per_class) != 12:
+        raise ValueError(f"VisDA per-class accuracy must have 12 values: {path}")
+    if not isinstance(class_counts, list) or len(class_counts) != 12:
+        raise ValueError(f"VisDA class counts must have 12 values: {path}")
+    if not all(isinstance(value, (int, float)) for value in per_class):
+        raise ValueError(f"VisDA per-class accuracy is not numeric: {path}")
+    if not all(isinstance(value, int) and value > 0 for value in class_counts):
+        raise ValueError(f"VisDA class counts are invalid: {path}")
+    macro = float(statistics.fmean(per_class))
+    if abs(macro - float(summary["Acc"])) > 1.0e-10:
+        raise ValueError(f"VisDA macro Acc does not equal class mean: {path}")
+    if sum(class_counts) != summary["processed_sample_count"]:
+        raise ValueError(f"VisDA class counts do not cover all samples: {path}")
+    return [
+        {
+            "class_id": class_id,
+            "class_name": class_name,
+            "Acc": float(per_class[class_id]),
+            "sample_count": int(class_counts[class_id]),
+        }
+        for class_id, class_name in enumerate(class_names)
+    ]
+
+
 def build_report(plan, runs_root):
     status = check_status(plan, runs_root)
     if status["unassociated_invalid_summaries"]:
@@ -100,12 +132,22 @@ def build_report(plan, runs_root):
         row["experiment_key"]: row for row in status["experiments"]
     }
     rows = []
+    visda_classwise = None
+    visda_metrics = None
     for experiment in plan["experiments"]:
         path = by_key[experiment["experiment_key"]][
             "matching_summary_paths"
         ][0]
         summary = _load_json(path)
         _validate_summary(summary, experiment, path)
+        if summary["dataset"] == "visda-c":
+            if visda_classwise is not None:
+                raise ValueError("More than one VisDA-C summary was found")
+            visda_classwise = _visda_classwise_rows(summary, path)
+            visda_metrics = {
+                "Acc": float(summary["Acc"]),
+                "overall-Acc": float(summary["overall-Acc"]),
+            }
         rows.append(
             {
                 "dataset": summary["dataset"],
@@ -132,6 +174,8 @@ def build_report(plan, runs_root):
     office = [row for row in rows if row["dataset"] == "office31"]
     if len(office) != 6:
         raise RuntimeError("Office-31 summary must contain six directions")
+    if visda_classwise is None or visda_metrics is None:
+        raise RuntimeError("VisDA-C classwise summary is missing")
     office_average = {
         "dataset": "office31",
         "transfer": "six-direction average",
@@ -155,11 +199,13 @@ def build_report(plan, runs_root):
         "summary_path": None,
     }
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "primary_metric": "macro_class_accuracy",
         "experiment_count": len(rows),
         "rows": rows,
         "office31_six_direction_average": office_average,
+        "visda_classwise": visda_classwise,
+        "visda_metrics": visda_metrics,
         "report_rows": [*office, office_average, *[
             row for row in rows if row["dataset"] == "visda-c"
         ]],
@@ -173,7 +219,7 @@ def _write_csv(path, rows):
         writer.writerows(rows)
 
 
-def _markdown(report_rows):
+def _markdown(report_rows, visda_classwise):
     lines = [
         "# DeiT-S TTDA source-only results",
         "",
@@ -189,6 +235,20 @@ def _markdown(report_rows):
             f"{row['Acc']:.4f} | {row['overall-Acc']:.4f} | "
             f"{row['processed_sample_count']} |"
         )
+    lines.extend(
+        [
+            "",
+            "## VisDA-C per-class accuracy",
+            "",
+            "| ID | Class | Acc | Samples |",
+            "|---:|---|---:|---:|",
+        ]
+    )
+    for row in visda_classwise:
+        lines.append(
+            f"| {row['class_id']} | {row['class_name']} | "
+            f"{row['Acc']:.4f} | {row['sample_count']} |"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -201,9 +261,39 @@ def write_report(report, output_dir):
     _write_csv(osp.join(output_dir, "per_transfer.csv"), report["rows"])
     _write_csv(osp.join(output_dir, "report.csv"), report["report_rows"])
     with open(
+        osp.join(output_dir, "visda_classwise.csv"),
+        "w",
+        encoding="utf-8",
+        newline="",
+    ) as file_obj:
+        writer = csv.DictWriter(file_obj, fieldnames=VISDA_CLASSWISE_FIELDS)
+        writer.writeheader()
+        writer.writerows(report["visda_classwise"])
+    wide_row = {
+        row["class_name"]: row["Acc"] for row in report["visda_classwise"]
+    }
+    wide_row.update(
+        {
+            "mean_class_Acc": report["visda_metrics"]["Acc"],
+            "overall_Acc": report["visda_metrics"]["overall-Acc"],
+        }
+    )
+    with open(
+        osp.join(output_dir, "visda_classwise_wide.csv"),
+        "w",
+        encoding="utf-8",
+        newline="",
+    ) as file_obj:
+        fieldnames = [*VISDA_CLASS_NAMES, "mean_class_Acc", "overall_Acc"]
+        writer = csv.DictWriter(file_obj, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(wide_row)
+    with open(
         osp.join(output_dir, "report.md"), "w", encoding="utf-8"
     ) as file_obj:
-        file_obj.write(_markdown(report["report_rows"]))
+        file_obj.write(
+            _markdown(report["report_rows"], report["visda_classwise"])
+        )
 
 
 def main():

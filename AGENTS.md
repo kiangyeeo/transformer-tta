@@ -298,7 +298,7 @@ temporary:     /home/nas3/biod/wangkangyi/tmp/
 - `tau`、`lambda`、LBI step size、max steps、到达 budget 的实际 steps；
 - 本次实验选定的 `delta_semantics`（例如 `legacy_dense_init` 或 `strict_masked_delta`）；
 - optimizer、LR、weight decay、batch size、AMP、model mode policy；
-- 指标口径：OTTA 记录 PU/FO，TTDA source-only 只记录单次完整 target 的 `Acc`；同时记录 peak GPU memory、wall time；
+- 指标口径：OTTA 记录 PU/FO，TTDA source-only 只记录单次完整 target 的 `Acc`；VisDA-C 必须同时展开 12 类具体准确率并验证其均值等于 macro `Acc`；同时记录 peak GPU memory、wall time；
 - Office overall 与 macro-per-class 的明确区别；VisDA 使用 12-class macro-per-class。
 
 先做最小 pilot：Office `A -> D` 与 VisDA `train -> validation`、一个 seed、OTTA、三个主 budget；先跑 Source-only、Full-dense、Candidate-dense，再跑 selectors。对一个代表任务做 paired-vs-independent。pilot 可以用 target accuracy 做工程 go/no-go 检查，但这不自动构成无偏的超参选择。展开正式矩阵前必须冻结 validation protocol：使用独立验证依据，或预先承诺报告全部 budgets；若沿用 target benchmark accuracy 选主 budget，则必须明确标为 oracle-style selection，不能同时声称 labels 只用于最终一次评估。
