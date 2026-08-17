@@ -31,7 +31,7 @@ from source_training.deit_data import (
 )
 
 
-ARTIFACT_SCHEMA_VERSION = 1
+ARTIFACT_SCHEMA_VERSION = 2
 
 
 def _utc_now():
@@ -69,7 +69,6 @@ def compute_fixed_class_metrics(
     *,
     num_classes,
     class_names,
-    prefix,
 ):
     """Compute fixed-denominator macro, overall, and per-class accuracy."""
     labels = np.asarray(labels, dtype=np.int64).reshape(-1)
@@ -100,15 +99,15 @@ def compute_fixed_class_metrics(
     overall = float(matrix.diagonal().sum() * 100.0 / matrix.sum())
     worst_id = int(np.argmin(per_class))
     return {
-        f"{prefix}-Acc": macro,
-        f"{prefix}-mean-class-Acc": macro,
-        f"{prefix}-overall-Acc": overall,
-        f"{prefix}-Acc-per-class": per_class.astype(float).tolist(),
-        f"{prefix}-class-count": counts.astype(int).tolist(),
-        f"{prefix}-worst-class-Acc": float(per_class[worst_id]),
-        f"{prefix}-worst-class-id": worst_id,
-        f"{prefix}-worst-class-name": class_names[worst_id],
-        f"{prefix}-class-std": float(np.std(per_class, ddof=0)),
+        "Acc": macro,
+        "mean-class-Acc": macro,
+        "overall-Acc": overall,
+        "Acc-per-class": per_class.astype(float).tolist(),
+        "class-count": counts.astype(int).tolist(),
+        "worst-class-Acc": float(per_class[worst_id]),
+        "worst-class-id": worst_id,
+        "worst-class-name": class_names[worst_id],
+        "class-std": float(np.std(per_class, ddof=0)),
     }
 
 
@@ -157,23 +156,6 @@ def _environment_record(device, amp_effective):
         "device": str(device),
         "amp_effective": bool(amp_effective),
     }
-
-
-def _assert_pu_fo_equal(pu_metrics, fo_metrics):
-    suffixes = (
-        "Acc",
-        "mean-class-Acc",
-        "overall-Acc",
-        "Acc-per-class",
-        "class-count",
-        "worst-class-Acc",
-        "worst-class-id",
-        "worst-class-name",
-        "class-std",
-    )
-    for suffix in suffixes:
-        if pu_metrics[f"PU-{suffix}"] != fo_metrics[f"FO-{suffix}"]:
-            raise RuntimeError(f"Source-only PU/FO mismatch for {suffix}")
 
 
 def run_source_only_experiment(config, project_root, *, model_factory=None):
@@ -297,13 +279,9 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
             "num_classes": config["data"]["num_classes"],
             "class_names": config["data"]["class_names"],
         }
-        pu_metrics = compute_fixed_class_metrics(
-            labels, predictions, prefix="PU", **metric_kwargs
+        metrics = compute_fixed_class_metrics(
+            labels, predictions, **metric_kwargs
         )
-        fo_metrics = compute_fixed_class_metrics(
-            labels, predictions, prefix="FO", **metric_kwargs
-        )
-        _assert_pu_fo_equal(pu_metrics, fo_metrics)
         runtime = float(time.perf_counter() - timer)
         peak_memory = (
             int(torch.cuda.max_memory_allocated(device))
@@ -318,8 +296,7 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
             "backward_calls": 0,
             "target_labels_usage": "evaluation_only",
             "prediction_passes": 1,
-            "pu_fo_prediction_reuse": True,
-            "pu_fo_predictions_equal": True,
+            "single_evaluation_pass": True,
             "model_state_sha256_before": state_before,
             "model_state_sha256_after": state_after,
             "model_state_unchanged": True,
@@ -339,8 +316,7 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
             "experiment_config_sha256": config[
                 "experiment_config_sha256"
             ],
-            **pu_metrics,
-            **fo_metrics,
+            **metrics,
             **invariant_record,
             "runtime": runtime,
             "peak_gpu_memory_bytes": peak_memory,
@@ -378,8 +354,7 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
                 "source_training_seed"
             ],
             "source_best": config["source_checkpoint"]["best"],
-            **pu_metrics,
-            **fo_metrics,
+            **metrics,
             **invariant_record,
             "runtime": runtime,
             "peak_gpu_memory_bytes": peak_memory,
@@ -400,9 +375,8 @@ def run_source_only_experiment(config, project_root, *, model_factory=None):
             },
         )
         print(
-            f"PU-Acc={summary['PU-Acc']} FO-Acc={summary['FO-Acc']} "
-            f"PU-overall-Acc={summary['PU-overall-Acc']} "
-            f"FO-overall-Acc={summary['FO-overall-Acc']} "
+            f"Acc={summary['Acc']} "
+            f"overall-Acc={summary['overall-Acc']} "
             f"runtime={runtime}",
             flush=True,
         )

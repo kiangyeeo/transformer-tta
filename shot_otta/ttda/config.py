@@ -392,6 +392,7 @@ def resolve_config(
     metrics = effective.get("metrics")
     if metrics != {
         "primary": "macro_class_accuracy",
+        "primary_output": "Acc",
         "class_denominator": "fixed_dataset_classes",
         "report_overall": True,
         "report_per_class": True,

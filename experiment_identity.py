@@ -287,7 +287,6 @@ def build_deit_ttda_source_only_identity(config):
             "amp": bool(evaluation["amp"]),
             "deterministic": bool(evaluation["deterministic"]),
             "prediction_passes": 1,
-            "pu_fo_prediction_reuse": True,
         },
         "metrics": copy.deepcopy(config["metrics"]),
         "adaptation": {

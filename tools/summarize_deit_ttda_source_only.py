@@ -18,10 +18,8 @@ from tools.check_experiment_status import check_status, load_plan  # noqa: E402
 
 
 METRIC_FIELDS = (
-    "PU-Acc",
-    "FO-Acc",
-    "PU-overall-Acc",
-    "FO-overall-Acc",
+    "Acc",
+    "overall-Acc",
 )
 ROW_FIELDS = (
     "dataset",
@@ -59,8 +57,10 @@ def _validate_summary(summary, experiment, path):
         raise ValueError(f"Summary contains backward calls: {path}")
     if summary.get("target_labels_usage") != "evaluation_only":
         raise ValueError(f"Summary target-label policy mismatch: {path}")
-    if summary.get("pu_fo_predictions_equal") is not True:
-        raise ValueError(f"Summary PU/FO predictions are not equal: {path}")
+    if summary.get("prediction_passes") != 1:
+        raise ValueError(f"Summary did not use one evaluation pass: {path}")
+    if summary.get("single_evaluation_pass") is not True:
+        raise ValueError(f"Summary evaluation-pass invariant failed: {path}")
     if summary.get("model_state_unchanged") is not True:
         raise ValueError(f"Summary model state changed: {path}")
     if summary.get("model_state_sha256_before") != summary.get(
@@ -80,10 +80,6 @@ def _validate_summary(summary, experiment, path):
         value = summary.get(metric)
         if not isinstance(value, (int, float)):
             raise ValueError(f"Summary metric {metric} is missing: {path}")
-    if summary["PU-Acc"] != summary["FO-Acc"]:
-        raise ValueError(f"Summary macro PU/FO differ: {path}")
-    if summary["PU-overall-Acc"] != summary["FO-overall-Acc"]:
-        raise ValueError(f"Summary overall PU/FO differ: {path}")
 
 
 def build_report(plan, runs_root):
@@ -159,7 +155,7 @@ def build_report(plan, runs_root):
         "summary_path": None,
     }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "primary_metric": "macro_class_accuracy",
         "experiment_count": len(rows),
         "rows": rows,
@@ -181,18 +177,16 @@ def _markdown(report_rows):
     lines = [
         "# DeiT-S TTDA source-only results",
         "",
-        "PU-Acc and FO-Acc are fixed-class macro accuracies. Overall "
-        "accuracies are reported alongside them.",
+        "Acc is fixed-class macro accuracy. Overall accuracy is reported "
+        "alongside it.",
         "",
-        "| Dataset | Transfer | PU-Acc | FO-Acc | PU overall | FO overall | Samples |",
-        "|---|---|---:|---:|---:|---:|---:|",
+        "| Dataset | Transfer | Acc | Overall Acc | Samples |",
+        "|---|---|---:|---:|---:|",
     ]
     for row in report_rows:
         lines.append(
             f"| {row['dataset']} | {row['transfer']} | "
-            f"{row['PU-Acc']:.4f} | {row['FO-Acc']:.4f} | "
-            f"{row['PU-overall-Acc']:.4f} | "
-            f"{row['FO-overall-Acc']:.4f} | "
+            f"{row['Acc']:.4f} | {row['overall-Acc']:.4f} | "
             f"{row['processed_sample_count']} |"
         )
     return "\n".join(lines) + "\n"

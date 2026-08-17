@@ -248,18 +248,16 @@ def _check_metrics():
         predictions,
         num_classes=3,
         class_names=["zero", "one", "two"],
-        prefix="PU",
     )
-    assert metrics["PU-overall-Acc"] == 50.0
-    assert math.isclose(metrics["PU-Acc"], 50.0)
-    assert metrics["PU-Acc-per-class"] == [50.0, 100.0, 0.0]
+    assert metrics["overall-Acc"] == 50.0
+    assert math.isclose(metrics["Acc"], 50.0)
+    assert metrics["Acc-per-class"] == [50.0, 100.0, 0.0]
     _expect_error(
         lambda: compute_fixed_class_metrics(
             [0, 1],
             [0, 1],
             num_classes=3,
             class_names=["zero", "one", "two"],
-            prefix="FO",
         ),
         "missing classes",
     )
@@ -341,15 +339,15 @@ def _check_end_to_end(root, base):
         effective, PROJECT_ROOT, model_factory=tiny_factory
     )
     expected = 100.0 / 31.0
-    assert math.isclose(summary["PU-Acc"], expected)
-    assert summary["PU-Acc"] == summary["FO-Acc"]
-    assert summary["PU-overall-Acc"] == summary["FO-overall-Acc"]
+    assert math.isclose(summary["Acc"], expected)
+    assert math.isclose(summary["overall-Acc"], expected)
     assert summary["processed_sample_count"] == 31
     assert summary["target_batch_count"] == 2
     assert summary["adaptation_steps"] == 0
     assert summary["optimizer_created"] is False
     assert summary["backward_calls"] == 0
-    assert summary["pu_fo_predictions_equal"] is True
+    assert summary["prediction_passes"] == 1
+    assert summary["single_evaluation_pass"] is True
     assert summary["model_state_unchanged"] is True
     output = Path(summary["output_dir"])
     for name in ("config.yaml", "manifest.json", "metrics.jsonl", "summary.json"):
@@ -399,16 +397,15 @@ def _check_plan_and_summary(root, base):
                 "source_name": experiment["source_name"],
                 "target_name": experiment["target_name"],
                 "seed": experiment["seed"],
-                "PU-Acc": macro,
-                "FO-Acc": macro,
-                "PU-overall-Acc": overall,
-                "FO-overall-Acc": overall,
+                "Acc": macro,
+                "overall-Acc": overall,
                 "adaptation_steps": 0,
                 "optimizer_created": False,
                 "loss_computed": False,
                 "backward_calls": 0,
                 "target_labels_usage": "evaluation_only",
-                "pu_fo_predictions_equal": True,
+                "prediction_passes": 1,
+                "single_evaluation_pass": True,
                 "model_state_unchanged": True,
                 "model_state_sha256_before": "a" * 64,
                 "model_state_sha256_after": "a" * 64,
@@ -425,7 +422,7 @@ def _check_plan_and_summary(root, base):
     report = build_report(plan, fake_runs)
     assert report["experiment_count"] == 7
     assert len(report["report_rows"]) == 8
-    assert report["office31_six_direction_average"]["PU-Acc"] == 12.5
+    assert report["office31_six_direction_average"]["Acc"] == 12.5
     report_output = Path(root) / "report"
     write_report(report, report_output)
     for name in ("report.json", "per_transfer.csv", "report.csv", "report.md"):

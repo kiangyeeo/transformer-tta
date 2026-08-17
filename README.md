@@ -126,10 +126,11 @@ python train_source_deit.py --config configs/source_deit_visda.yaml --dry-run
 
 This control evaluates the unchanged source checkpoint on the full target
 dataset. It creates no optimizer, computes no adaptation loss, performs no
-backward pass, and uses one prediction pass for both PU and FO. Macro
-per-class accuracy is the primary `PU-Acc`/`FO-Acc`; overall and per-class
-accuracies are also recorded. The evaluator verifies that PU and FO
-predictions are identical and that the complete model state hash is unchanged.
+backward pass, and uses one full-target prediction pass. Fixed-class macro
+accuracy is reported as `Acc`; overall and per-class accuracies are also
+recorded. The evaluator verifies that the complete model state hash is
+unchanged. PU/FO remain specific to the legacy streaming OTTA protocol and are
+not duplicated into this TTDA control.
 
 Prepare the environment and generate the fixed seven-task plan:
 
