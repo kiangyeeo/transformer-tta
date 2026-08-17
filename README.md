@@ -21,7 +21,8 @@ This repository studies sparse update-support discovery for test-time adaptation
 | Conv filter/channel Group Split-LBI | Not found in this repository |
 | DeiT-S source training | Implemented; all four server-side source checkpoints are reported complete |
 | DeiT-S TTDA source-only integration | Implemented and CPU-tested with synthetic checkpoints |
-| DeiT-S trainable TTDA / OTTA integration | Not implemented |
+| DeiT-S OTTA source-only streaming integration | Implemented and CPU-tested with synthetic checkpoints |
+| DeiT-S trainable TTDA / OTTA adaptation | Not implemented |
 | Transformer paired QK/VO/FFN groups | Not implemented |
 | TTDA | Source-only control only; adaptation is not implemented |
 
@@ -37,6 +38,7 @@ Two method-level decisions remain unresolved:
 ```text
 train.py                 Legacy single-run SHOT-OTTA entry point
 evaluate_deit_ttda.py    DeiT TTDA source-only evaluation entry point
+evaluate_deit_otta.py    DeiT OTTA source-only streaming entry point
 shot_otta/               Data, models, losses, trainer, and artifacts
 core/lbi/                Existing element-wise Split-LBI implementation
 source_training/         Legacy SHOT plus local-only DeiT source training
@@ -48,7 +50,7 @@ scripts/                 Maintenance utilities
 tests/                   Synthetic smoke and engineering tests
 ```
 
-The reusable pieces include the SHOT objective, image-list data pipeline, artifact system, experiment planning and launch infrastructure, summaries, and the broad LBI stage lifecycle. The strict local DeiT adapter, Transformer-aware identity, and zero-adaptation TTDA evaluator are implemented. Transformer structural groups, group proximal operators, matched selectors, OTTA integration, and trainable TTDA remain future work.
+The reusable pieces include the SHOT objective, image-list data pipeline, artifact system, experiment planning and launch infrastructure, summaries, and the broad LBI stage lifecycle. The strict local DeiT adapter, Transformer-aware identities, and zero-adaptation TTDA/OTTA evaluators are implemented. Transformer structural groups, group proximal operators, matched selectors, trainable OTTA, and trainable TTDA remain future work.
 
 ## Installation
 
@@ -194,6 +196,72 @@ The full launcher skips the already completed pilot automatically:
 These commands are provided for the user to execute on the server; Codex has
 not launched the real evaluations.
 
+## DeiT OTTA Source-only Baseline
+
+This control loads the same four versioned DeiT `.pth` source checkpoints and
+traverses each target domain as one ordered batch stream. Every batch produces
+an `online_batch` artifact, state is carried to the next batch, and a final
+size-one batch is retained. No optimizer, loss, backward call, or parameter
+update is allowed. `PU-Acc` summarizes predictions made during the stream;
+`FO-Acc` uses the final-model evaluation semantics. Because this control keeps
+`W_T == W_0`, FO reuses the exact stream predictions and PU/FO must be bitwise
+consistent. A trainable OTTA method will intentionally remove that equality.
+
+Generate and dry-run the seven-task DeiT OTTA plan:
+
+```bash
+export PROJECT_ROOT=/home/nas3/biod/wangkangyi/transformer-tta
+export RESULT_ROOT=/home/nas3/biod/wangkangyi/results/transformer_otta_source_only
+export PYTHON_BIN=/home/nas3/biod/wangkangyi/envs/lbi/bin/python
+export HF_HOME=/home/nas3/biod/wangkangyi/hf-cache
+export TORCH_HOME=/home/nas3/biod/wangkangyi/hf-cache/torch
+export PIP_CACHE_DIR=/home/nas3/biod/wangkangyi/pip-cache
+export CONDA_PKGS_DIRS=/home/nas3/biod/wangkangyi/conda-pkgs
+export TMPDIR=/home/nas3/biod/wangkangyi/tmp
+export PLAN_PATH="$RESULT_ROOT/plans/deit_otta_source_only.json"
+
+cd "$PROJECT_ROOT"
+"$PYTHON_BIN" tools/plan_deit_otta_source_only.py \
+  --config configs/deit_otta_source_only.yaml \
+  --matrix experiments/deit_otta_source_only.yaml \
+  --output "$PLAN_PATH"
+
+"$PYTHON_BIN" tools/run_experiments_multi_gpu.py "$PLAN_PATH" \
+  --runs-root "$RESULT_ROOT/runs" \
+  --logs-root "$RESULT_ROOT/launcher_logs/full_dry_run" \
+  --workdir "$PROJECT_ROOT" \
+  --gpus 0,1,2,3,4,5,6 \
+  --max-workers 7 \
+  --workers-per-gpu 1 \
+  --dry-run
+```
+
+After a one-GPU A-to-D pilot, run the remaining status-aware tasks and produce
+the PU/FO report, including both scores for all 12 VisDA-C classes:
+
+```bash
+"$PYTHON_BIN" tools/run_experiments.py "$PLAN_PATH" \
+  --runs-root "$RESULT_ROOT/runs" \
+  --logs-root "$RESULT_ROOT/launcher_logs/pilot_AD" \
+  --workdir "$PROJECT_ROOT" \
+  --dataset office31 --source 0 --target 1 --max-experiments 1
+
+"$PYTHON_BIN" tools/run_experiments_multi_gpu.py "$PLAN_PATH" \
+  --runs-root "$RESULT_ROOT/runs" \
+  --logs-root "$RESULT_ROOT/launcher_logs/full" \
+  --workdir "$PROJECT_ROOT" \
+  --gpus 0,1,2,3,4,5,6 \
+  --max-workers 7 \
+  --workers-per-gpu 1
+
+"$PYTHON_BIN" tools/summarize_deit_otta_source_only.py \
+  --plan "$PLAN_PATH" \
+  --runs-root "$RESULT_ROOT/runs" \
+  --output-dir "$RESULT_ROOT/summary"
+```
+
+Codex has not launched these server evaluations.
+
 ## Server Constraints
 
 The experiment server has eight RTX 3090 GPUs with 24 GB of memory each, but its primary disk is full. Code, data, checkpoints, environments, caches, temporary files, and experiment outputs must remain under:
@@ -202,7 +270,7 @@ The experiment server has eight RTX 3090 GPUs with 24 GB of memory each, but its
 /home/nas3/biod/wangkangyi/
 ```
 
-See `catalog.md` for the exact known paths. Model construction must not trigger implicit downloads. Set `HF_HOME`, `TORCH_HOME`, `PIP_CACHE_DIR`, `CONDA_PKGS_DIRS`, and `TMPDIR` to locations under the approved root. The TTDA source-only result root is frozen; output locations for later Transformer adaptation matrices remain undecided.
+See `catalog.md` for the exact known paths. Model construction must not trigger implicit downloads. Set `HF_HOME`, `TORCH_HOME`, `PIP_CACHE_DIR`, `CONDA_PKGS_DIRS`, and `TMPDIR` to locations under the approved root. The TTDA source-only result root is frozen; the OTTA source-only config uses its own sibling result root. Output locations for later trainable Transformer adaptation matrices remain undecided.
 
 ## Dependency Policy
 

@@ -1,0 +1,48 @@
+# Frozen DeiT-S OTTA source-only control. Sequential stream, zero adaptation.
+schema_version: 1
+method: no_tta
+task: otta
+variant: source_only
+seed: 2020
+
+device:
+  type: cuda
+  gpu_id: "0"
+
+data:
+  dataset: office31
+  source: 0
+  target: 1
+  list_root: /home/nas3/biod/wangkangyi/datasets/image_lists
+
+model:
+  name: deit_small_patch16_224.fb_in1k
+  source_checkpoint_root: /home/nas3/biod/wangkangyi/checkpoints/source_models
+
+preprocessing:
+  resize_size: 256
+  crop_size: 224
+  interpolation: bicubic
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+evaluation:
+  batch_size: 256
+  workers: 8
+  amp: true
+  deterministic: true
+  pin_memory: true
+  order: sequential
+  drop_last: false
+
+metrics:
+  primary: macro_class_accuracy
+  primary_outputs: [PU-Acc, FO-Acc]
+  class_denominator: fixed_dataset_classes
+  report_overall: true
+  report_per_class: true
+  final_prediction_policy: reuse_when_state_unchanged
+
+output:
+  root: /home/nas3/biod/wangkangyi/results/transformer_otta_source_only/runs
+  run_name: null

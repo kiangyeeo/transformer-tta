@@ -48,12 +48,12 @@ Until those fields are recorded, documentation must say "user-confirmed" and
 must not claim byte-level checkpoint reproducibility or locally verified model
 quality.
 
-The DeiT TTDA source-only evaluator now enforces this boundary at runtime: it
-requires every adjacent source manifest, binds the experiment identity to the
-manifest checkpoint SHA-256, and asks the versioned checkpoint loader to hash
-and verify the actual `.pth` before inference. This local implementation has
-only been tested with synthetic checkpoints; the four real server artifacts
-remain user-confirmed until the server-side preflight reads them.
+The DeiT TTDA and OTTA source-only evaluators now enforce this boundary at
+runtime: they require every adjacent source manifest, bind experiment identity
+to the manifest checkpoint SHA-256, and ask the versioned checkpoint loader to
+hash and verify the actual `.pth` before inference. These local implementations
+have only been tested with synthetic checkpoints; the four real server
+artifacts remain user-confirmed until the server-side preflight reads them.
 
 ## TTDA Source-only Output
 
@@ -67,6 +67,20 @@ a fixed six-direction Office-31 plus one-direction VisDA-C plan, a dry-run
 preflight, one-GPU A-to-D pilot command, seven-slot launcher command, and a
 strict summary tool.
 
+## OTTA Source-only Output
+
+The new DeiT source-only OTTA control uses the separate default result root:
+
+`/home/nas3/biod/wangkangyi/results/transformer_otta_source_only/`
+
+It runs the same six Office-31 directions and VisDA-C train-to-validation task
+as an ordered target stream. It records every incoming batch, retains a
+size-one tail batch, and reports macro-per-class `PU-Acc` and `FO-Acc` plus
+overall and per-class metrics. Zero adaptation means the final model is still
+`W0`, so the implementation reuses predictions and requires PU/FO and the
+before/after model hashes to match exactly. No real OTTA evaluation has been
+launched by Codex. Trainable DeiT OTTA remains unimplemented.
+
 ## Server Boundary
 
 All server assets remain under `/home/nas3/biod/wangkangyi/`. In particular:
@@ -75,6 +89,7 @@ All server assets remain under `/home/nas3/biod/wangkangyi/`. In particular:
 - datasets: `/home/nas3/biod/wangkangyi/datasets/`
 - source checkpoints: `/home/nas3/biod/wangkangyi/checkpoints/source_models/`
 - TTDA source-only results: `/home/nas3/biod/wangkangyi/results/transformer_ttda_source_only/`
+- OTTA source-only results: `/home/nas3/biod/wangkangyi/results/transformer_otta_source_only/`
 - environment: `/home/nas3/biod/wangkangyi/envs/lbi/`
 - caches and temporary files: the dedicated paths in `catalog.md`
 

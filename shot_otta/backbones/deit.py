@@ -1,4 +1,4 @@
-"""Strict local DeiT source-checkpoint adapter for target evaluation."""
+"""Strict local DeiT source-checkpoint adapter for TTA evaluation."""
 
 import hashlib
 
@@ -65,7 +65,7 @@ def load_frozen_deit_source(config, device, *, model_factory=None):
     _validate_loaded_metadata(metadata, config)
     head = model.get_classifier()
     if not isinstance(head, nn.Linear):
-        raise TypeError("DeiT TTDA source-only requires a direct Linear head")
+        raise TypeError("DeiT source-only TTA requires a direct Linear head")
     expected_classes = config["data"]["num_classes"]
     if head.in_features != 384 or head.out_features != expected_classes:
         raise ValueError(

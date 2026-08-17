@@ -39,9 +39,9 @@ W^{\mathrm{TTA}} = W_0 + \Delta W,
 | Conv dense update | 部分已有 | `full_dense` 更新 `netF + netB`，因此会更新 ResNet Conv；这不是 Conv group sparse update |
 | Conv filter/channel Group Split-LBI | 未发现 | 当前 Git 仅有 `master/origin/master`，仓库和历史中没有相应实现 |
 | DeiT source trainer | 已实现；4 个 W0 已在服务器产出 | `train_source_deit.py` 全量微调 non-distilled DeiT-S，直接 `Linear(384,31/12)` head；2026-08-17 用户确认 Office-31 三域和 VisDA-C train 的 `.pth` 均位于 catalog 约定路径，本地尚未核验 manifest/hash |
-| DeiT/Transformer TTA backbone | 部分已有 | 已有严格本地 W0 加载和 TTDA source-only 直接 logits 评测；OTTA、可训练 TTDA 和 structural adaptation 尚未接入 |
+| DeiT/Transformer TTA backbone | 部分已有 | 已有严格本地 W0 加载、TTDA source-only 直接评测和 OTTA source-only 流式评测；可训练 OTTA/TTDA 与 structural adaptation 尚未接入 |
 | Transformer structural groups | 未实现 | 没有 group registry、group prox、group mask/scatter |
-| OTTA | 已实现 | 单遍 target stream；每个 batch 适配后预测，模型状态传给后续 batch |
+| OTTA | source-only 与 legacy FC 已实现 | `evaluate_deit_otta.py` 提供 DeiT 零适配流式 control；legacy ResNet/VGG 路径支持每 batch 适配。DeiT 可训练 OTTA 尚未实现 |
 | TTDA | 仅 source-only control | `evaluate_deit_ttda.py` 支持零适配的完整 target dataset 评测；任何 TTDA adaptation 生命周期仍未实现 |
 | TENT/EATA/CoTTA 等独立 TTA 方法 | 未实现 | 现有 baseline 是同一 SHOT objective 下的更新/选择 baseline |
 | Source-domain trainer | ResNet/VGG + DeiT 可用 | legacy SHOT 三文件路径保持不变；DeiT 使用新单文件 schema、source-only validation 与每 epoch resume state |
@@ -60,8 +60,9 @@ transformer-tta/
 ├── requirements.txt            # 所有运行时 Python 依赖必须记录在这里
 ├── train.py                     # 现有 SHOT-OTTA 单次实验入口
 ├── evaluate_deit_ttda.py        # DeiT TTDA source-only 零适配评测入口
+├── evaluate_deit_otta.py        # DeiT OTTA source-only 顺序流评测入口
 ├── train_source_deit.py         # DeiT-S source-domain 训练统一入口
-├── experiment_identity.py       # legacy FC 与 DeiT TTDA source-only 实验身份
+├── experiment_identity.py       # legacy FC 与 DeiT TTDA/OTTA source-only 实验身份
 ├── shot_otta/                   # 数据、模型、loss、trainer、artifact
 ├── core/lbi/                    # 逐元素 Split-LBI engine/state/diagnostics
 ├── source_training/             # SHOT 风格 ResNet/VGG source trainer
@@ -129,14 +130,14 @@ proposal 的最终方程暗示严格的 `W_new = W_base + delta_masked`。当前
 - group prox 中 `lambda` 与 support threshold `tau`；
 - tiny budget 的取整规则，以及 Split-LBI 一步跨过目标 K 时是 exact-K top score 还是回滚；
 - DeiT source training v1 已由 `SOURCE_TRAINING_DEIT_PROTOCOL.md` 冻结：直接 `Linear(384,C)`、无 bottleneck、全模型 AdamW 微调、Office 100/VisDA 10 epochs、global batch 64、固定分层 90/10 source split、只按 source validation 选 W0。修改这些定义必须升级协议并同步配置，不能只改代码默认值；
-- source training、可训练 TTA 和评估的 resize/crop、bicubic interpolation、crop percentage、augmentation、ImageNet mean/std 和 input normalization；当前 TTDA source-only 已冻结为 source v1 validation transform，但不能自动扩展为 adaptation 协议；
+- source training、可训练 TTA 和评估的 resize/crop、bicubic interpolation、crop percentage、augmentation、ImageNet mean/std 和 input normalization；当前 TTDA/OTTA source-only 已冻结为 source v1 validation transform，但不能自动扩展为可训练 adaptation 协议；
 - Transformer 的 dropout/DropPath policy。当前 FC trainer 会把 `netF` 置为 train；DeiT 通常应保持 deterministic eval，除非显式研究 stochastic adaptation；
 - bias、LayerNorm、class/position tokens、classifier 和可选 bottleneck 的冻结/更新策略；
 - TTDA 的数据生命周期、epoch 数、模型选择和 evaluation timing；
 - offline validation protocol：source validation、held-out transfer、target validation split、固定全 budget 汇报，或沿用旧代码的 target-accuracy oracle selection；
 - `source_training_seed`、`tta_stream_seed` 和 selector/random-mask seed 的关系，以及正式三 seed 是否共享一个固定 W0；
-- Transformer source checkpoint 已采用 versioned 单文件格式并有 round-trip/hash 测试；TTDA source-only loader 已接入，legacy ResNet/VGG 仍保留三文件格式；其他 TTA 路径尚未接入新 schema；
-- 其他 Transformer 正式实验的 output root；当前只冻结了 source-only control 的独立目录。
+- Transformer source checkpoint 已采用 versioned 单文件格式并有 round-trip/hash 测试；TTDA/OTTA source-only loader 已接入，legacy ResNet/VGG 仍保留三文件格式；可训练 Transformer TTA 路径尚未接入新 schema；
+- 其他 Transformer 正式实验的 output root；TTDA source-only 正式路径已冻结，OTTA source-only 使用独立默认路径，可训练 adaptation 的路径仍未冻结。
 
 不要通过代码默认值隐式决定这些实验定义。
 
@@ -187,7 +188,7 @@ tests/source_checkpoint_compatibility_test.py
 
 1. 离线加载 DeiT-S，完成 forward 和 parameter-name contract；
 2. ~~完成 DeiT source-domain trainer、checkpoint round trip 与服务器四域训练；~~ 代码/合成测试已完成，4 个真实数据 W0 已由用户确认产出；manifest/hash/指标仍待归档；
-3. ~~跑通 Source-only、~~再实现并跑通 Full-dense、last-3 Candidate-dense；（当前只完成 TTDA source-only control）
+3. ~~跑通 TTDA/OTTA Source-only、~~再实现并跑通 Full-dense、last-3 Candidate-dense；（当前完成两个零适配 control）
 4. 抽象 group API，以 FC singleton 测试证明 legacy 行为未变；
 5. 实现并测试 paired/independent Transformer groups；
 6. 实现 matched-budget Random/Magnitude/Saliency；
@@ -261,6 +262,7 @@ datasets:      /home/nas3/biod/wangkangyi/datasets/
 pretrained:    /home/nas3/biod/wangkangyi/checkpoints/deit_small_patch16_224.fb_in1k/
 source models: /home/nas3/biod/wangkangyi/checkpoints/source_models/
 TTDA source-only results: /home/nas3/biod/wangkangyi/results/transformer_ttda_source_only/
+OTTA source-only results: /home/nas3/biod/wangkangyi/results/transformer_otta_source_only/
 conda env:     /home/nas3/biod/wangkangyi/envs/lbi/
 HF cache:      /home/nas3/biod/wangkangyi/hf-cache/
 pip cache:     /home/nas3/biod/wangkangyi/pip-cache/
@@ -271,7 +273,7 @@ temporary:     /home/nas3/biod/wangkangyi/tmp/
 
 服务器命令应显式设置 `HF_HOME`、`TORCH_HOME`、`PIP_CACHE_DIR`、`CONDA_PKGS_DIRS`、`TMPDIR` 等到上述根目录内，禁止默认写入 `$HOME`、系统 `/tmp` 或主盘缓存。TTA evaluation 必须先以不下载 pretrained weight 的方式构建模型，再加载本地 source checkpoint；不得因 `pretrained=True` 隐式联网。
 
-用户已确认 DeiT TTDA source-only control 的正式结果根目录为 `/home/nas3/biod/wangkangyi/results/transformer_ttda_source_only/`。这一裁决只覆盖该七任务零适配基线；后续 Transformer sparse/dense、OTTA 或 TTDA adaptation 的正式 output root 仍需单独冻结。旧代码的相对 `output.root: runs` 约定不得自动套用到新实验。
+用户已确认 DeiT TTDA source-only control 的正式结果根目录为 `/home/nas3/biod/wangkangyi/results/transformer_ttda_source_only/`。DeiT OTTA source-only 配置采用独立默认路径 `/home/nas3/biod/wangkangyi/results/transformer_otta_source_only/`，但这不冻结后续可训练 OTTA 的正式目录。后续 Transformer sparse/dense、可训练 OTTA 或 TTDA adaptation 的正式 output root 仍需单独冻结。旧代码的相对 `output.root: runs` 约定不得自动套用到新实验。
 
 开发采用 local-first：本地完成静态实现、CPU/synthetic tests 和配置生成，再上传服务器。服务器先做单卡、单任务、短 stream pilot；确认数值、速度、显存和 artifact 后，才按“一张卡一个独立进程”扩展到 8 卡。launcher 默认只有 GPU 0--3 和 4 workers，正式执行需显式传 0--7 与 8 workers。
 

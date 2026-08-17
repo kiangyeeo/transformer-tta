@@ -8,7 +8,10 @@ import re
 
 import yaml
 
-from experiment_identity import resolve_deit_ttda_source_only_identity
+from experiment_identity import (
+    resolve_deit_otta_source_only_identity,
+    resolve_deit_ttda_source_only_identity,
+)
 
 
 CONFIG_SCHEMA_VERSION = 1
@@ -272,18 +275,20 @@ def resolve_config(
     *,
     provided_key=None,
     provided_sha256=None,
+    expected_task=None,
 ):
     effective = copy.deepcopy(config)
     if effective.get("schema_version") != CONFIG_SCHEMA_VERSION:
         raise ValueError(f"schema_version must be {CONFIG_SCHEMA_VERSION}")
-    fixed = {
-        "method": "no_tta",
-        "task": "ttda",
-        "variant": "source_only",
-    }
+    fixed = {"method": "no_tta", "variant": "source_only"}
     for field, expected in fixed.items():
         if effective.get(field) != expected:
             raise ValueError(f"{field} must be {expected}")
+    task = effective.get("task")
+    if task not in {"otta", "ttda"}:
+        raise ValueError("task must be otta or ttda")
+    if expected_task is not None and task != expected_task:
+        raise ValueError(f"task must be {expected_task}")
     effective["seed"] = int(effective.get("seed", 2020))
 
     data = effective.get("data")
@@ -368,7 +373,7 @@ def resolve_config(
     }
     if preprocessing != expected_preprocessing:
         raise ValueError(
-            "TTDA source-only preprocessing must match source validation v1"
+            "DeiT source-only preprocessing must match source validation v1"
         )
 
     evaluation = effective.get("evaluation")
@@ -390,14 +395,26 @@ def resolve_config(
         raise ValueError("TTDA source-only drop_last must be false")
 
     metrics = effective.get("metrics")
-    if metrics != {
-        "primary": "macro_class_accuracy",
-        "primary_output": "Acc",
-        "class_denominator": "fixed_dataset_classes",
-        "report_overall": True,
-        "report_per_class": True,
-    }:
-        raise ValueError("TTDA source-only metric policy is frozen")
+    expected_metrics = (
+        {
+            "primary": "macro_class_accuracy",
+            "primary_outputs": ["PU-Acc", "FO-Acc"],
+            "class_denominator": "fixed_dataset_classes",
+            "report_overall": True,
+            "report_per_class": True,
+            "final_prediction_policy": "reuse_when_state_unchanged",
+        }
+        if task == "otta"
+        else {
+            "primary": "macro_class_accuracy",
+            "primary_output": "Acc",
+            "class_denominator": "fixed_dataset_classes",
+            "report_overall": True,
+            "report_per_class": True,
+        }
+    )
+    if metrics != expected_metrics:
+        raise ValueError(f"{task.upper()} source-only metric policy is frozen")
 
     device = effective.get("device")
     if not isinstance(device, dict) or device.get("type") not in ("cuda", "cpu"):
@@ -410,7 +427,12 @@ def resolve_config(
     output.setdefault("run_name", None)
     effective["task_name"] = f"{source_name[0].upper()}{target_name[0].upper()}"
 
-    identity = resolve_deit_ttda_source_only_identity(
+    identity_resolver = (
+        resolve_deit_otta_source_only_identity
+        if task == "otta"
+        else resolve_deit_ttda_source_only_identity
+    )
+    identity = identity_resolver(
         effective,
         provided_key=provided_key,
         provided_sha256=provided_sha256,
@@ -423,7 +445,7 @@ def experiment_output_root(config):
     data = config["data"]
     return osp.join(
         config["output"]["root"],
-        "ttda",
+        config["task"],
         data["dataset"],
         config["task_name"],
         "source_only",

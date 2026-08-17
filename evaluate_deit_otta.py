@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate a DeiT-S source checkpoint under TTDA with no adaptation."""
+"""Evaluate a DeiT-S source checkpoint as a no-adaptation OTTA stream."""
 
 import argparse
 import os
@@ -10,7 +10,7 @@ from shot_otta.ttda.config import apply_overrides, load_yaml, resolve_config
 
 PROJECT_ROOT = osp.dirname(osp.abspath(__file__))
 DEFAULT_CONFIG = osp.join(
-    PROJECT_ROOT, "configs", "deit_ttda_source_only.yaml"
+    PROJECT_ROOT, "configs", "deit_otta_source_only.yaml"
 )
 
 
@@ -46,7 +46,7 @@ def main():
         PROJECT_ROOT,
         provided_key=args.experiment_key,
         provided_sha256=args.experiment_config_sha256,
-        expected_task="ttda",
+        expected_task="otta",
     )
     if args.dry_run:
         import sys
@@ -55,9 +55,9 @@ def main():
         yaml.safe_dump(effective, sys.stdout, sort_keys=False, allow_unicode=True)
         return 0
     os.environ["CUDA_VISIBLE_DEVICES"] = effective["device"]["gpu_id"]
-    from shot_otta.ttda.source_only import run_source_only_experiment
+    from shot_otta.otta.source_only import run_source_only_otta_experiment
 
-    run_source_only_experiment(effective, PROJECT_ROOT)
+    run_source_only_otta_experiment(effective, PROJECT_ROOT)
     return 0
 
 

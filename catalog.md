@@ -36,7 +36,8 @@
 ├── conda-home/
 ├── tmp/
 ├── results/
-│   └── transformer_ttda_source_only/ # 已确认的 DeiT TTDA source-only 正式结果根目录
+│   ├── transformer_ttda_source_only/ # 已确认的 DeiT TTDA source-only 正式结果根目录
+│   └── transformer_otta_source_only/ # DeiT OTTA source-only 配置采用的独立结果根目录
 └── miniconda3/
 
 状态说明：以上 4 个 source-model `.pth` 路径与训练配置中的
@@ -48,3 +49,8 @@ DeiT TTDA source-only 的正式输出根目录已由用户确认冻结为
 `/home/nas3/biod/wangkangyi/results/transformer_ttda_source_only/`。其中 `runs/`
 保存逐实验 artifact，`launcher_logs/` 保存调度日志，`plans/` 保存固定七任务计划，
 `summary/` 保存最终汇总表。
+
+DeiT OTTA source-only 配置和运行指令采用
+`/home/nas3/biod/wangkangyi/results/transformer_otta_source_only/`，避免与 TTDA
+identity、run 和汇总产物混放。该路径是本次实现的独立默认值；它不代表后续可训练
+OTTA 或结构化 adaptation 的正式结果根目录已经冻结。
