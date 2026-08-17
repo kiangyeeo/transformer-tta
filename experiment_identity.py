@@ -4,6 +4,8 @@ import copy
 import hashlib
 import json
 
+from shot_otta.backbones.deit import candidate_parameter_names
+
 
 SUPPORTED_VARIANTS = {
     "source_only",
@@ -450,23 +452,49 @@ def resolve_deit_otta_source_only_identity(
     return computed
 
 
-def build_deit_otta_full_dense_identity(config):
-    """Build an identity for the DeiT full-dense OTTA baseline.
+ADAPTATION_PROTOCOLS = {
+    "full_dense": "sequential_target_stream_full_dense_adaptation",
+    "candidate_dense": "sequential_target_stream_candidate_dense_adaptation",
+}
 
-    The SHOT objective plus AdamW dense updates form a new protocol, so the
-    identity is separate from both the legacy FC identity and the DeiT
-    source-only identity.  Optimizer, loss, and adaptation settings are
-    identity-bound: changing them produces a different experiment key.
+
+def build_deit_otta_adaptation_identity(config):
+    """Build an identity for a DeiT OTTA adaptation baseline.
+
+    Supports the ``full_dense`` and ``candidate_dense`` variants.  The SHOT
+    objective plus AdamW updates form a new protocol, so the identity is
+    separate from both the legacy FC identity and the DeiT source-only
+    identity.  Variant, update scope, candidate blocks, optimizer, loss, and
+    adaptation settings are identity-bound: changing any of them produces a
+    different experiment key.
     """
+    variant = config["variant"]
     data = config["data"]
     checkpoint = config["source_checkpoint"]
     evaluation = config["evaluation"]
     adaptation = config["adaptation"]
+    candidate_blocks = adaptation.get("candidate_blocks")
+    adaptation_record = {
+        "update_scope": adaptation["update_scope"],
+        "model_mode": adaptation["model_mode"],
+        "steps_per_batch": int(adaptation["steps_per_batch"]),
+        "delta_semantics": "unrestricted_accumulation",
+        "budget": "full",
+        "target_labels_usage": "evaluation_only",
+        "state_carried_between_batches": True,
+    }
+    if variant == "candidate_dense":
+        adaptation_record["candidate_blocks"] = sorted(
+            int(block) for block in candidate_blocks
+        )
+        adaptation_record["candidate_parameter_names"] = sorted(
+            candidate_parameter_names(candidate_blocks)
+        )
     scientific_config = {
         "method": "shot",
         "task": "otta",
-        "protocol": "sequential_target_stream_full_dense_adaptation",
-        "variant": "full_dense",
+        "protocol": ADAPTATION_PROTOCOLS[variant],
+        "variant": variant,
         "dataset": data["dataset"],
         "source": int(data["source"]),
         "target": int(data["target"]),
@@ -506,15 +534,7 @@ def build_deit_otta_full_dense_identity(config):
             "final_prediction_policy": "independent_full_target_pass",
         },
         "metrics": copy.deepcopy(config["metrics"]),
-        "adaptation": {
-            "update_scope": adaptation["update_scope"],
-            "model_mode": adaptation["model_mode"],
-            "steps_per_batch": int(adaptation["steps_per_batch"]),
-            "delta_semantics": "unrestricted_accumulation",
-            "budget": "full",
-            "target_labels_usage": "evaluation_only",
-            "state_carried_between_batches": True,
-        },
+        "adaptation": adaptation_record,
         "optimization": copy.deepcopy(config["optimization"]),
         "loss": copy.deepcopy(config["loss"]),
     }
@@ -527,7 +547,7 @@ def build_deit_otta_full_dense_identity(config):
             data["dataset"],
             f"s{int(data['source'])}-t{int(data['target'])}",
             f"seed{int(config['seed'])}",
-            "full_dense",
+            variant,
             full_sha256[:12],
         ]
     )
@@ -538,12 +558,12 @@ def build_deit_otta_full_dense_identity(config):
     }
 
 
-def resolve_deit_otta_full_dense_identity(
+def resolve_deit_otta_adaptation_identity(
     config,
     provided_key=None,
     provided_sha256=None,
 ):
-    computed = build_deit_otta_full_dense_identity(config)
+    computed = build_deit_otta_adaptation_identity(config)
     if (provided_key is None) != (provided_sha256 is None):
         raise ValueError(
             "experiment_key and experiment_config_sha256 must be "
@@ -553,11 +573,11 @@ def resolve_deit_otta_full_dense_identity(
         if provided_key != computed["experiment_key"]:
             raise ValueError(
                 "Provided experiment_key does not match the effective DeiT "
-                "OTTA full-dense configuration"
+                "OTTA adaptation configuration"
             )
         if provided_sha256 != computed["experiment_config_sha256"]:
             raise ValueError(
                 "Provided experiment_config_sha256 does not match the "
-                "effective DeiT OTTA full-dense configuration"
+                "effective DeiT OTTA adaptation configuration"
             )
     return computed

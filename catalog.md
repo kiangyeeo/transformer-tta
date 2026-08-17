@@ -38,7 +38,7 @@
 ├── results/
 │   ├── transformer_ttda_source_only/ # 已确认的 DeiT TTDA source-only 正式结果根目录
 │   ├── transformer_otta_source_only/ # DeiT OTTA source-only 配置采用的独立结果根目录
-│   └── transformer_otta_full_dense/  # DeiT OTTA full-dense 配置采用的默认结果根目录（未冻结）
+│   └── transformer_otta_full_dense/  # DeiT OTTA full/candidate-dense 配置采用的默认结果根目录（未冻结）
 └── miniconda3/
 
 状态说明：以上 4 个 source-model `.pth` 路径与训练配置中的
@@ -56,6 +56,6 @@ DeiT OTTA source-only 配置和运行指令采用
 identity、run 和汇总产物混放。该路径是本次实现的独立默认值；它不代表后续可训练
 OTTA 或结构化 adaptation 的正式结果根目录已经冻结。
 
-DeiT OTTA full-dense baseline 的配置默认结果根目录为
+DeiT OTTA full-dense/candidate-dense baseline 的配置默认结果根目录为
 `/home/nas3/biod/wangkangyi/results/transformer_otta_full_dense/`。它只是本次
 实现给出的默认值，尚未被冻结为可训练 OTTA 的正式结果根目录。

@@ -1,4 +1,8 @@
-"""Sequential full-dense DeiT OTTA baseline: SHOT objective + AdamW updates."""
+"""Sequential DeiT OTTA adaptation baselines: SHOT objective + AdamW.
+
+Supports the full-dense (all parameters) and candidate-dense (weight tensors
+of the last-3 candidate blocks only) variants.
+"""
 
 import copy
 import os.path as osp
@@ -17,6 +21,7 @@ from shot_otta.artifacts import (
     git_info,
 )
 from shot_otta.backbones.deit import (
+    candidate_parameter_names,
     hash_model_state,
     load_deit_source_for_adaptation,
 )
@@ -38,6 +43,12 @@ from shot_otta.deit_source_only.runtime import (
 from shot_otta.losses import deit_shot_adaptation_loss
 from shot_otta.otta.full_dense_config import experiment_output_root
 
+SUPPORTED_VARIANTS = {"full_dense", "candidate_dense"}
+ADAPTATION_PROTOCOLS = {
+    "full_dense": "sequential_target_stream_full_dense_adaptation",
+    "candidate_dense": "sequential_target_stream_candidate_dense_adaptation",
+}
+
 
 def _delta_stats(model, initial_state):
     """Count changed scalars and the L2 norm of W_T - W_0."""
@@ -58,20 +69,23 @@ def _delta_stats(model, initial_state):
     }
 
 
-def run_full_dense_otta_experiment(
+def run_deit_otta_adaptation_experiment(
     config, project_root, *, model_factory=None
 ):
-    """Run the DeiT full-dense OTTA baseline.
+    """Run a DeiT OTTA adaptation baseline (full-dense or candidate-dense).
 
     Protocol: sequential target stream.  Every batch runs ``steps_per_batch``
-    AdamW updates on the SHOT objective; the updated model then predicts the
-    same batch (PU).  After the stream the model is frozen and an independent
-    full-target pass produces FO metrics.
+    AdamW updates on the SHOT objective over the configured parameter scope;
+    the updated model then predicts the same batch (PU).  After the stream the
+    model is frozen and an independent full-target pass produces FO metrics.
     """
-    if config.get("task") != "otta" or config.get("variant") != "full_dense":
+    variant = config.get("variant")
+    if config.get("task") != "otta" or variant not in SUPPORTED_VARIANTS:
         raise ValueError(
-            "full-dense runner requires task=otta variant=full_dense"
+            "adaptation runner requires task=otta and variant in "
+            f"{sorted(SUPPORTED_VARIANTS)}"
         )
+    protocol = ADAPTATION_PROTOCOLS[variant]
     output_root = experiment_output_root(config)
     run_id, output_dir = create_run_dir(
         output_root,
@@ -88,14 +102,20 @@ def run_full_dense_otta_experiment(
     started_at = utc_now()
     timer = time.perf_counter()
     steps_per_batch = int(config["adaptation"]["steps_per_batch"])
+    candidate_blocks = config["adaptation"].get("candidate_blocks")
+    candidate_names = (
+        sorted(candidate_parameter_names(candidate_blocks))
+        if candidate_blocks is not None
+        else None
+    )
     base_manifest = {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
         "run_id": run_id,
         "created_at_utc": started_at,
         "method": "shot",
         "task": "otta",
-        "protocol": "sequential_target_stream_full_dense_adaptation",
-        "variant": "full_dense",
+        "protocol": protocol,
+        "variant": variant,
         "dataset": config["data"]["dataset"],
         "source": config["data"]["source"],
         "target": config["data"]["target"],
@@ -128,6 +148,8 @@ def run_full_dense_otta_experiment(
             "target_labels_usage": "evaluation_only",
             "state_carried_between_batches": True,
             "tail_batch_size_one_policy": "kept",
+            "candidate_blocks": candidate_blocks,
+            "candidate_parameter_names": candidate_names,
         },
         "optimization": copy.deepcopy(config["optimization"]),
         "loss": copy.deepcopy(config["loss"]),
@@ -172,8 +194,16 @@ def run_full_dense_otta_experiment(
             for parameter in model.parameters()
             if parameter.requires_grad
         )
+        if candidate_names is None:
+            candidate_scalars = trainable_scalars
+        else:
+            candidate_scalars = sum(
+                parameter.numel()
+                for name, parameter in model.named_parameters()
+                if name in set(candidate_names)
+            )
         print(
-            "[otta-full-dense] W0 loaded, trainable scalars="
+            f"[{variant}] W0 loaded, trainable scalars="
             f"{trainable_scalars} (state_sha256={state_before[:12]}...)",
             flush=True,
         )
@@ -395,6 +425,7 @@ def run_full_dense_otta_experiment(
             "state_carried_between_batches": True,
             "delta_nonzero_scalars": delta_stats["delta_nonzero_scalars"],
             "total_parameter_scalars": delta_stats["total_parameter_scalars"],
+            "candidate_scalars": candidate_scalars,
             "delta_l2_norm": delta_stats["delta_l2_norm"],
             "trainable_scalars": trainable_scalars,
         }
@@ -418,9 +449,9 @@ def run_full_dense_otta_experiment(
             "run_id": run_id,
             "output_dir": output_dir,
             "method": "shot",
-            "variant": "full_dense",
+            "variant": variant,
             "task": "otta",
-            "protocol": "sequential_target_stream_full_dense_adaptation",
+            "protocol": protocol,
             "dataset": config["data"]["dataset"],
             "source": config["data"]["source"],
             "target": config["data"]["target"],
@@ -485,7 +516,7 @@ def run_full_dense_otta_experiment(
                     "experiment_config_sha256"
                 ],
                 "method": "shot",
-                "variant": "full_dense",
+                "variant": variant,
                 "task": "otta",
                 "dataset": config["data"]["dataset"],
                 "source": config["data"]["source"],

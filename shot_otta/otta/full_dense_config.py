@@ -1,14 +1,23 @@
-"""Configuration resolution for the DeiT full-dense OTTA baseline."""
+"""Configuration resolution for DeiT OTTA adaptation baselines.
+
+Supports the ``full_dense`` (all parameters) and ``candidate_dense`` (only the
+weight tensors of the last-3 candidate blocks) variants.
+"""
 
 import os.path as osp
 
-from experiment_identity import resolve_deit_otta_full_dense_identity
+from experiment_identity import resolve_deit_otta_adaptation_identity
 from shot_otta.deit_source_only.config import (
     _resolve_deit_common,
     deit_metrics_policy,
 )
 
 ALLOWED_LOSS_COMPONENTS = {"ent", "div", "pseudo"}
+VARIANTS = {
+    "full_dense": "all_parameters",
+    "candidate_dense": "last_3_block_weights",
+}
+NUM_BLOCKS = 12
 
 
 def _positive_float(value, field, *, allow_zero=False):
@@ -22,17 +31,40 @@ def _positive_float(value, field, *, allow_zero=False):
 
 
 def _validate_adaptation(config):
+    variant = config["variant"]
     adaptation = config.get("adaptation")
     if not isinstance(adaptation, dict):
         raise ValueError("adaptation must be a mapping")
-    if adaptation.get("update_scope") != "all_parameters":
-        raise ValueError("adaptation.update_scope must be all_parameters")
+    expected_scope = VARIANTS[variant]
+    if adaptation.get("update_scope") != expected_scope:
+        raise ValueError(
+            f"adaptation.update_scope must be {expected_scope} for "
+            f"variant {variant}"
+        )
     if adaptation.get("model_mode") != "eval":
         raise ValueError("adaptation.model_mode must be eval")
     steps = adaptation.get("steps_per_batch")
     if isinstance(steps, bool) or int(steps) != steps or int(steps) < 1:
         raise ValueError("adaptation.steps_per_batch must be a positive int")
     adaptation["steps_per_batch"] = int(steps)
+    if variant == "candidate_dense":
+        blocks = adaptation.get("candidate_blocks")
+        if not isinstance(blocks, list) or not blocks:
+            raise ValueError("adaptation.candidate_blocks must be a non-empty list")
+        converted_blocks = []
+        for block in blocks:
+            if isinstance(block, bool) or int(block) != block:
+                raise ValueError("adaptation.candidate_blocks must be integers")
+            converted_blocks.append(int(block))
+        if converted_blocks != sorted(converted_blocks):
+            raise ValueError("adaptation.candidate_blocks must be sorted")
+        if len(set(converted_blocks)) != len(converted_blocks):
+            raise ValueError("adaptation.candidate_blocks must be unique")
+        if not all(0 <= block < NUM_BLOCKS for block in converted_blocks):
+            raise ValueError(
+                f"adaptation.candidate_blocks must be in [0, {NUM_BLOCKS})"
+            )
+        adaptation["candidate_blocks"] = converted_blocks
 
 
 def _validate_optimization(config):
@@ -94,17 +126,20 @@ def resolve_config(
     provided_key=None,
     provided_sha256=None,
 ):
-    fixed = {"method": "shot", "task": "otta", "variant": "full_dense"}
-    for field, expected in fixed.items():
-        if config.get(field) != expected:
-            raise ValueError(f"{field} must be {expected}")
+    if config.get("method") != "shot":
+        raise ValueError("method must be shot")
+    if config.get("task") != "otta":
+        raise ValueError("task must be otta")
+    variant = config.get("variant")
+    if variant not in VARIANTS:
+        raise ValueError(f"variant must be one of {sorted(VARIANTS)}")
     effective = _resolve_deit_common(config, project_root, "otta")
     if effective["metrics"] != deit_metrics_policy("otta"):
-        raise ValueError("OTTA full-dense metric policy is frozen")
+        raise ValueError("OTTA adaptation metric policy is frozen")
     _validate_adaptation(effective)
     _validate_optimization(effective)
     _validate_loss(effective)
-    identity = resolve_deit_otta_full_dense_identity(
+    identity = resolve_deit_otta_adaptation_identity(
         effective,
         provided_key=provided_key,
         provided_sha256=provided_sha256,
@@ -120,6 +155,6 @@ def experiment_output_root(config):
         config["task"],
         data["dataset"],
         config["task_name"],
-        "full_dense",
+        config["variant"],
         f"seed_{int(config['seed'])}",
     )

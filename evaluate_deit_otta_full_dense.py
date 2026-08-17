@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Evaluate DeiT-S full-dense OTTA: SHOT objective + AdamW dense updates."""
+"""Evaluate DeiT-S OTTA adaptation: SHOT objective + AdamW updates.
+
+Supports ``full_dense`` (all parameters) and ``candidate_dense`` (weight
+tensors of the last-3 candidate blocks only).
+"""
 
 import argparse
 import os
@@ -9,7 +13,7 @@ import sys
 import yaml
 
 from shot_otta.deit_source_only.config import apply_overrides, load_yaml
-from shot_otta.otta.full_dense import run_full_dense_otta_experiment
+from shot_otta.otta.full_dense import run_deit_otta_adaptation_experiment
 from shot_otta.otta.full_dense_config import resolve_config
 
 
@@ -18,11 +22,12 @@ PROJECT_ROOT = osp.dirname(osp.abspath(__file__))
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Evaluate DeiT-S under OTTA with full-dense adaptation."
+        description="Evaluate DeiT-S under OTTA with dense adaptation."
     )
+    parser.add_argument("--variant", choices=["full_dense", "candidate_dense"])
     parser.add_argument(
         "--config",
-        default=osp.join(PROJECT_ROOT, "configs", "deit_otta_full_dense.yaml"),
+        help="Path to the run configuration (default: per-variant yaml).",
     )
     parser.add_argument("--dataset", choices=["office31", "visda-c"])
     parser.add_argument("--source", type=int)
@@ -47,7 +52,14 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+    variant = args.variant or "full_dense"
+    if args.config is None:
+        args.config = osp.join(
+            PROJECT_ROOT, "configs", f"deit_otta_{variant}.yaml"
+        )
     config = apply_overrides(load_yaml(args.config), args)
+    if args.variant is not None:
+        config["variant"] = args.variant
     effective = resolve_config(
         config,
         PROJECT_ROOT,
@@ -58,7 +70,7 @@ def main():
         yaml.safe_dump(effective, sys.stdout, sort_keys=False, allow_unicode=True)
         return 0
     os.environ["CUDA_VISIBLE_DEVICES"] = effective["device"]["gpu_id"]
-    run_full_dense_otta_experiment(effective, PROJECT_ROOT)
+    run_deit_otta_adaptation_experiment(effective, PROJECT_ROOT)
     return 0
 
 

@@ -7,6 +7,17 @@ import torch.nn as nn
 
 from source_training.deit_model import load_deit_source_checkpoint
 
+# Proposal-frozen candidate space: the weight tensors of the last 3 blocks.
+# Bias, LayerNorm, class/position tokens, patch embed, final norm, and the
+# head are deliberately outside the structural candidate denominator.
+DEFAULT_CANDIDATE_BLOCKS = (9, 10, 11)
+CANDIDATE_WEIGHT_COMPONENTS = (
+    "attn.qkv.weight",
+    "attn.proj.weight",
+    "mlp.fc1.weight",
+    "mlp.fc2.weight",
+)
+
 
 def hash_model_state(model):
     """Hash parameter and buffer values in a stable name/dtype/shape order."""
@@ -65,6 +76,35 @@ def _check_direct_head(model, config):
     return head
 
 
+def candidate_parameter_names(candidate_blocks=DEFAULT_CANDIDATE_BLOCKS):
+    """Return the exact weight-tensor names updated by candidate-dense."""
+    names = set()
+    for block in candidate_blocks:
+        for component in CANDIDATE_WEIGHT_COMPONENTS:
+            names.add(f"blocks.{int(block)}.{component}")
+    return names
+
+
+def apply_update_scope(model, update_scope, candidate_blocks=None):
+    """Set ``requires_grad`` according to the frozen adaptation scope.
+
+    Returns the exact set of trainable parameter names.
+    """
+    if update_scope == "all_parameters":
+        model.requires_grad_(True)
+        return {name for name, _ in model.named_parameters()}
+    if update_scope == "last_3_block_weights":
+        if candidate_blocks is None:
+            candidate_blocks = DEFAULT_CANDIDATE_BLOCKS
+        trainable = candidate_parameter_names(candidate_blocks)
+        model.requires_grad_(False)
+        for name, parameter in model.named_parameters():
+            if name in trainable:
+                parameter.requires_grad_(True)
+        return trainable
+    raise ValueError(f"Unsupported update_scope: {update_scope}")
+
+
 def load_frozen_deit_source(config, device, *, model_factory=None):
     """Load W0, validate its metadata/head, freeze it, and select eval mode."""
     checkpoint = config["source_checkpoint"]
@@ -84,10 +124,12 @@ def load_frozen_deit_source(config, device, *, model_factory=None):
 
 
 def load_deit_source_for_adaptation(config, device, *, model_factory=None):
-    """Load W0, validate its metadata/head, and enable dense gradients.
+    """Load W0, validate its metadata/head, and enable scope-limited gradients.
 
-    All parameters become trainable; the model stays in eval mode so the
-    frozen drop_rate/drop_path_rate of 0.0 keep the stream deterministic.
+    ``adaptation.update_scope`` selects either all parameters (full-dense) or
+    exactly the candidate weight tensors of ``adaptation.candidate_blocks``
+    (candidate-dense).  The model stays in eval mode so the frozen
+    drop_rate/drop_path_rate of 0.0 keep the stream deterministic.
     """
     checkpoint = config["source_checkpoint"]
     model, metadata = load_deit_source_checkpoint(
@@ -98,8 +140,21 @@ def load_deit_source_for_adaptation(config, device, *, model_factory=None):
     )
     _validate_loaded_metadata(metadata, config)
     _check_direct_head(model, config)
-    model.requires_grad_(True)
+    adaptation = config["adaptation"]
+    expected_trainable = apply_update_scope(
+        model,
+        adaptation["update_scope"],
+        candidate_blocks=adaptation.get("candidate_blocks"),
+    )
     model.eval()
-    if not all(parameter.requires_grad for parameter in model.parameters()):
-        raise RuntimeError("Full-dense adaptation failed to enable gradients")
+    actual_trainable = {
+        name for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    if not actual_trainable:
+        raise RuntimeError("Adaptation selected no trainable parameters")
+    if actual_trainable != set(expected_trainable):
+        raise RuntimeError(
+            "Adaptation trainable set does not match the configured scope"
+        )
     return model, metadata
