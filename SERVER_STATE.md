@@ -90,7 +90,9 @@ source-only control, but every batch runs one AdamW update on the SHOT
 objective (entropy + diversity + confident pseudo-label CE). Two variants are
 available through `evaluate_deit_otta_full_dense.py --variant ...`:
 
-- `full_dense`: updates all 21,677,599 parameters;
+- `full_dense`: updates every parameter **except the classifier/head**,
+  which is frozen (`update_scope: all_except_head`, 21,665,664 trainable
+  scalars of 21,677,599);
 - `candidate_dense`: updates only the weight tensors
   `attn.qkv/attn.proj/mlp.fc1/mlp.fc2` of blocks 9, 10, 11 (5,308,416
   scalars); bias, LayerNorm, class/position tokens, patch embed, final norm,
@@ -110,10 +112,11 @@ This root is the implementation default only; it has not been frozen as the
 formal trainable-OTTA output root. The optimizer is frozen in the config as
 AdamW with `lr=1.0e-5`, `betas=[0.9, 0.999]`, `eps=1.0e-8`,
 `weight_decay=0.01`, one step per batch, model mode `eval`, and
-`delta_semantics: unrestricted_accumulation`. On the server only the
-Office-31 amazon->dslr full-dense run has been executed (completed); the
-other six directions and all candidate-dense runs have not been launched by
-Codex.
+`delta_semantics: unrestricted_accumulation`.  The earlier full-dense runs
+that trained the classifier were archived under
+`results/transformer_otta_full_dense/_archive_old_full_dense_head_trainable_20260817/`
+and are superseded; the candidate-dense runs remain valid.  The re-run of
+full-dense with the frozen head has not been launched by Codex.
 
 ## Server Boundary
 

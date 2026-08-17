@@ -41,7 +41,7 @@ W^{\mathrm{TTA}} = W_0 + \Delta W,
 | DeiT source trainer | 已实现；4 个 W0 已在服务器产出 | `train_source_deit.py` 全量微调 non-distilled DeiT-S，直接 `Linear(384,31/12)` head；2026-08-17 用户确认 Office-31 三域和 VisDA-C train 的 `.pth` 均位于 catalog 约定路径，本地尚未核验 manifest/hash |
 | DeiT/Transformer TTA backbone | 部分已有 | 已有严格本地 W0 加载、TTDA source-only 直接评测、OTTA source-only 流式评测和 OTTA full-dense/candidate-dense 可训练 baseline；structural adaptation 尚未接入 |
 | Transformer structural groups | 未实现 | 没有 group registry、group prox、group mask/scatter |
-| OTTA | source-only、full-dense、candidate-dense 与 legacy FC 已实现 | `evaluate_deit_otta.py` 提供 DeiT 零适配流式 control；`evaluate_deit_otta_full_dense.py --variant {full_dense,candidate_dense}` 提供 SHOT objective + AdamW 的 dense update（full-dense 全参数、candidate-dense 仅最后 3 block 的 qkv/proj/fc1/fc2 weight，bias/LN/head 冻结；均本地实现，服务器已跑 AD full-dense、candidate 未跑）；legacy ResNet/VGG 路径支持每 batch 适配。DeiT 可训练 sparse OTTA 尚未实现 |
+| OTTA | source-only、full-dense、candidate-dense 与 legacy FC 已实现 | `evaluate_deit_otta.py` 提供 DeiT 零适配流式 control；`evaluate_deit_otta_full_dense.py --variant {full_dense,candidate_dense}` 提供 SHOT objective + AdamW 的 dense update（full-dense 更新除 classifier/head 外的全部参数即 `all_except_head`，candidate-dense 仅最后 3 block 的 qkv/proj/fc1/fc2 weight，两者的 bias/LN/head 均冻结；均本地实现，服务器旧 full_dense 已按 head 冻结语义重跑待确认、candidate 已跑）；legacy ResNet/VGG 路径支持每 batch 适配。DeiT 可训练 sparse OTTA 尚未实现 |
 | TTDA | 仅 source-only control | `evaluate_deit_ttda.py` 支持零适配的完整 target dataset 评测；任何 TTDA adaptation 生命周期仍未实现 |
 | TENT/EATA/CoTTA 等独立 TTA 方法 | 未实现 | 现有 baseline 是同一 SHOT objective 下的更新/选择 baseline |
 | Source-domain trainer | ResNet/VGG + DeiT 可用 | legacy SHOT 三文件路径保持不变；DeiT 使用新单文件 schema、source-only validation 与每 epoch resume state |

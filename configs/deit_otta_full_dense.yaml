@@ -1,5 +1,7 @@
 # DeiT-S OTTA full-dense baseline. Sequential stream, SHOT objective, AdamW
-# dense updates on all parameters (delta_semantics: unrestricted_accumulation).
+# updates on every parameter EXCEPT the classifier/head (the head is frozen,
+# matching the SHOT-style dense semantic; delta_semantics:
+# unrestricted_accumulation).
 schema_version: 1
 method: shot
 task: otta
@@ -21,7 +23,7 @@ model:
   source_checkpoint_root: /home/nas3/biod/wangkangyi/checkpoints/source_models
 
 adaptation:
-  update_scope: all_parameters
+  update_scope: all_except_head
   model_mode: eval
   steps_per_batch: 1
 

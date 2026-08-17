@@ -14,7 +14,7 @@ from shot_otta.deit_source_only.config import (
 
 ALLOWED_LOSS_COMPONENTS = {"ent", "div", "pseudo"}
 VARIANTS = {
-    "full_dense": "all_parameters",
+    "full_dense": "all_except_head",
     "candidate_dense": "last_3_block_weights",
 }
 NUM_BLOCKS = 12

@@ -26,7 +26,6 @@ for path in (PROJECT_ROOT, TEST_ROOT):
 from deit_source_only_fixtures import (  # noqa: E402
     SOURCE_CHECKPOINT_KIND,
     SOURCE_CHECKPOINT_SCHEMA_VERSION,
-    TinyDeiT,
     checkpoint_metadata,
     install_real_fake_checkpoint,
     prepare_assets,
@@ -50,17 +49,73 @@ CANDIDATE_CONFIG_PATH = osp.join(
 CANDIDATE_SCALARS = 5_308_416  # 3 blocks x 4 weight tensors of the real DeiT-S
 
 
-class CountingTinyDeiT(TinyDeiT):
+class DenseTinyDeiT(nn.Module):
+    """Tiny DeiT whose non-head params (cls_token, pos_embed) affect logits.
+
+    Every parameter produces gradients, so full-dense (all_except_head)
+    updates cls_token + pos_embed deterministically while the head stays
+    frozen.
+    """
+
     total_forward_calls = 0
+
+    def __init__(self, num_classes, **kwargs):
+        super().__init__()
+        del kwargs
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, 384))
+        self.pos_embed = nn.Parameter(torch.zeros(1, 2, 384))
+        self.head = nn.Linear(384, num_classes)
+
+    def get_classifier(self):
+        return self.head
 
     def forward(self, images):
         type(self).total_forward_calls += 1
-        return super().forward(images)
+        batch = images.size(0)
+        device = images.device
+        dtype = images.dtype
+        base = images.mean(dim=(1, 2, 3))  # per-sample feature scalar
+        # Fold cls_token/pos_embed into the features fed to the (frozen) head
+        # so every one of their scalars shares the same nonzero gradient and
+        # the SHOT loss is not invariant to the perturbation.
+        extra = base * (self.cls_token.sum() + self.pos_embed.sum())
+        features = torch.zeros(batch, 384, device=device, dtype=dtype)
+        features[:, 0] = base + 0.01 * extra
+        return self.head(features)
 
 
-def counting_tiny_factory(model_name, **kwargs):
+def dense_tiny_factory(model_name, **kwargs):
     assert model_name == "deit_small_patch16_224.fb_in1k"
-    return CountingTinyDeiT(**kwargs)
+    return DenseTinyDeiT(**kwargs)
+
+
+def install_dense_fake_checkpoint(root):
+    """Overwrite amazon.pth with a dense-shaped fake W0 (nonzero head)."""
+    install_real_fake_checkpoint(root)
+    path = Path(root) / "checkpoints" / "office31" / "amazon.pth"
+    model = DenseTinyDeiT(num_classes=31)
+    metadata = checkpoint_metadata("office31", "amazon", 31)
+    torch.save(
+        {
+            "schema_version": SOURCE_CHECKPOINT_SCHEMA_VERSION,
+            "kind": SOURCE_CHECKPOINT_KIND,
+            "state_dict": model.state_dict(),
+            "metadata": metadata,
+        },
+        path,
+    )
+    write_json(
+        path.with_suffix(".manifest.json"),
+        {
+            **metadata,
+            "checkpoint": {
+                "path": str(path.resolve()),
+                "sha256": sha256_file(path),
+                "schema_version": SOURCE_CHECKPOINT_SCHEMA_VERSION,
+                "kind": SOURCE_CHECKPOINT_KIND,
+            },
+        },
+    )
 
 
 class CandidateTinyDeiT(nn.Module):
@@ -186,7 +241,7 @@ def _check_config_contract(base):
     assert scientific["protocol"] == (
         "sequential_target_stream_full_dense_adaptation"
     )
-    assert scientific["adaptation"]["update_scope"] == "all_parameters"
+    assert scientific["adaptation"]["update_scope"] == "all_except_head"
     assert scientific["adaptation"]["model_mode"] == "eval"
     assert scientific["adaptation"]["delta_semantics"] == (
         "unrestricted_accumulation"
@@ -237,11 +292,11 @@ def _check_validation(base):
 
 
 def _check_end_to_end(root, base):
-    install_real_fake_checkpoint(root)
+    install_dense_fake_checkpoint(root)
     effective = resolve_config(base, PROJECT_ROOT)
-    CountingTinyDeiT.total_forward_calls = 0
+    DenseTinyDeiT.total_forward_calls = 0
     summary = run_deit_otta_adaptation_experiment(
-        effective, PROJECT_ROOT, model_factory=counting_tiny_factory
+        effective, PROJECT_ROOT, model_factory=dense_tiny_factory
     )
     assert summary["status"] == "completed"
     assert summary["variant"] == "full_dense"
@@ -265,21 +320,23 @@ def _check_end_to_end(root, base):
     assert summary["fo_prediction_passes"] == 1
     assert summary["fo_predictions_reused"] is False
     assert summary["fo_evaluation_scope"] == "full_target_dataset"
-    # Only head column 0 (gradients) and the bias (gradients + decay) can
-    # move in this fixture: other head columns, cls_token, and pos_embed are
-    # initialized to zero and receive no gradient, so decay leaves them at 0.
-    assert 0 < summary["delta_nonzero_scalars"] <= 62
+    # full-dense (all_except_head) freezes the classifier: only cls_token
+    # (384) and pos_embed (768) are trainable and both get gradients, while
+    # the head (11,935) stays exactly at W0.
+    assert summary["total_parameter_scalars"] == 13_087
+    assert summary["trainable_scalars"] == 1_152
+    assert summary["candidate_scalars"] == 1_152
+    assert summary["delta_nonzero_scalars"] == 1_152
     assert summary["delta_nonzero_scalars"] < summary[
         "total_parameter_scalars"
     ]
     assert summary["delta_l2_norm"] > 0.0
     assert math.isfinite(summary["delta_l2_norm"])
-    assert summary["trainable_scalars"] == summary["total_parameter_scalars"]
     assert 0.0 <= summary["PU-Acc"] <= 100.0
     assert 0.0 <= summary["FO-Acc"] <= 100.0
     # Two adaptation forwards (loss + PU prediction) per batch plus one FO
     # inference forward per batch: 3 * 2 = 6 forwards in total.
-    assert CountingTinyDeiT.total_forward_calls == 6
+    assert DenseTinyDeiT.total_forward_calls == 6
     output = Path(summary["output_dir"])
     assert (output / "manifest.json").is_file()
     assert (output / "summary.json").is_file()
@@ -289,6 +346,7 @@ def _check_end_to_end(root, base):
     assert manifest["protocol"] == (
         "sequential_target_stream_full_dense_adaptation"
     )
+    assert manifest["adaptation"]["update_scope"] == "all_except_head"
     assert manifest["adaptation"]["delta_semantics"] == (
         "unrestricted_accumulation"
     )
@@ -397,6 +455,19 @@ def _check_freeze_scope():
         parameter.requires_grad for parameter in model.parameters()
     )
     assert len(all_trainable) == len(list(model.named_parameters()))
+    # all_except_head (full-dense semantic): classifier frozen, everything
+    # else trainable.
+    model = DenseTinyDeiT(num_classes=31)
+    dense_trainable = apply_update_scope(model, "all_except_head")
+    assert "head.weight" not in dense_trainable
+    assert "head.bias" not in dense_trainable
+    assert set(dense_trainable) == {
+        name for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    assert len(dense_trainable) == 2
+    assert not model.head.weight.requires_grad
+    assert not model.head.bias.requires_grad
 
 
 def _check_candidate_end_to_end(root, base):

@@ -85,14 +85,29 @@ def candidate_parameter_names(candidate_blocks=DEFAULT_CANDIDATE_BLOCKS):
     return names
 
 
+def _freeze_classifier(model):
+    """Freeze the direct Linear classifier (head) parameters."""
+    head = model.get_classifier()
+    head.requires_grad_(False)
+    return {name for name, _ in head.named_parameters()}
+
+
 def apply_update_scope(model, update_scope, candidate_blocks=None):
     """Set ``requires_grad`` according to the frozen adaptation scope.
 
-    Returns the exact set of trainable parameter names.
+    Returns the exact set of trainable parameter names.  ``all_parameters``
+    leaves the classifier trainable; ``all_except_head`` (the full-dense
+    semantic) enables every parameter except the classifier; and
+    ``last_3_block_weights`` enables only the candidate weight tensors.
     """
-    if update_scope == "all_parameters":
+    if update_scope in ("all_parameters", "all_except_head"):
         model.requires_grad_(True)
-        return {name for name, _ in model.named_parameters()}
+        if update_scope == "all_except_head":
+            _freeze_classifier(model)
+        return {
+            name for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+        }
     if update_scope == "last_3_block_weights":
         if candidate_blocks is None:
             candidate_blocks = DEFAULT_CANDIDATE_BLOCKS
