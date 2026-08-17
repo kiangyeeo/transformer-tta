@@ -1,0 +1,10 @@
+schema_version: 1
+method: no_tta
+task: ttda
+variant: source_only
+seeds: [2020]
+datasets:
+  office31:
+    transfers: all_ordered_pairs
+  visda-c:
+    transfers: [[0, 1]]

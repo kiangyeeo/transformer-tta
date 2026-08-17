@@ -35,9 +35,16 @@
 ├── conda-pkgs/
 ├── conda-home/
 ├── tmp/
+├── results/
+│   └── transformer_ttda_source_only/ # 已确认的 DeiT TTDA source-only 正式结果根目录
 └── miniconda3/
 
 状态说明：以上 4 个 source-model `.pth` 路径与训练配置中的
 `checkpoint.output_path` 一致。权重文件留在服务器，不复制进 Git；本地仓库尚未核验
 对应 manifest 中的 SHA-256、best epoch 和 source-validation 指标。动态状态详见
 `SERVER_STATE.md`。
+
+DeiT TTDA source-only 的正式输出根目录已由用户确认冻结为
+`/home/nas3/biod/wangkangyi/results/transformer_ttda_source_only/`。其中 `runs/`
+保存逐实验 artifact，`launcher_logs/` 保存调度日志，`plans/` 保存固定七任务计划，
+`summary/` 保存最终汇总表。

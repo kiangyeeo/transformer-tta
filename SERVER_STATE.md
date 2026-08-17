@@ -48,6 +48,25 @@ Until those fields are recorded, documentation must say "user-confirmed" and
 must not claim byte-level checkpoint reproducibility or locally verified model
 quality.
 
+The DeiT TTDA source-only evaluator now enforces this boundary at runtime: it
+requires every adjacent source manifest, binds the experiment identity to the
+manifest checkpoint SHA-256, and asks the versioned checkpoint loader to hash
+and verify the actual `.pth` before inference. This local implementation has
+only been tested with synthetic checkpoints; the four real server artifacts
+remain user-confirmed until the server-side preflight reads them.
+
+## TTDA Source-only Output
+
+The user confirmed the formal result root for the seven no-adaptation DeiT
+TTDA controls as:
+
+`/home/nas3/biod/wangkangyi/results/transformer_ttda_source_only/`
+
+No real evaluation run has been launched by Codex. The implementation provides
+a fixed six-direction Office-31 plus one-direction VisDA-C plan, a dry-run
+preflight, one-GPU A-to-D pilot command, seven-slot launcher command, and a
+strict summary tool.
+
 ## Server Boundary
 
 All server assets remain under `/home/nas3/biod/wangkangyi/`. In particular:
@@ -55,6 +74,7 @@ All server assets remain under `/home/nas3/biod/wangkangyi/`. In particular:
 - repository: `/home/nas3/biod/wangkangyi/transformer-tta/`
 - datasets: `/home/nas3/biod/wangkangyi/datasets/`
 - source checkpoints: `/home/nas3/biod/wangkangyi/checkpoints/source_models/`
+- TTDA source-only results: `/home/nas3/biod/wangkangyi/results/transformer_ttda_source_only/`
 - environment: `/home/nas3/biod/wangkangyi/envs/lbi/`
 - caches and temporary files: the dedicated paths in `catalog.md`
 

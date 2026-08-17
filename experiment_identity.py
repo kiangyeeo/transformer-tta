@@ -237,3 +237,107 @@ def resolve_experiment_identity(
                 "effective scientific configuration"
             )
     return computed
+
+
+def build_deit_ttda_source_only_identity(config):
+    """Build an identity for the no-adaptation DeiT TTDA control.
+
+    This is intentionally separate from ``build_experiment_identity`` so the
+    legacy FC/SHOT identity remains byte-for-byte stable.
+    """
+    data = config["data"]
+    checkpoint = config["source_checkpoint"]
+    evaluation = config["evaluation"]
+    scientific_config = {
+        "method": "no_tta",
+        "task": "ttda",
+        "protocol": "full_target_dataset_no_adaptation",
+        "variant": "source_only",
+        "dataset": data["dataset"],
+        "source": int(data["source"]),
+        "target": int(data["target"]),
+        "source_name": data["source_name"],
+        "target_name": data["target_name"],
+        "seed": int(config["seed"]),
+        "model": {
+            "name": config["model"]["name"],
+            "implementation": "timm",
+            "non_distilled": True,
+            "head_schema": config["model"]["head_schema"],
+            "drop_rate": 0.0,
+            "drop_path_rate": 0.0,
+        },
+        "source_checkpoint": {
+            "sha256": checkpoint["sha256"],
+            "schema_version": checkpoint["schema_version"],
+            "kind": checkpoint["kind"],
+            "source_training_seed": checkpoint["source_training_seed"],
+        },
+        "target_data": {
+            "list_sha256": data["target_list_sha256"],
+            "class_mapping_sha256": data["class_mapping_sha256"],
+            "sample_count": int(data["target_sample_count"]),
+            "num_classes": int(data["num_classes"]),
+            "order": "sequential",
+            "drop_last": False,
+        },
+        "preprocessing": copy.deepcopy(config["preprocessing"]),
+        "evaluation": {
+            "batch_size": int(evaluation["batch_size"]),
+            "amp": bool(evaluation["amp"]),
+            "deterministic": bool(evaluation["deterministic"]),
+            "prediction_passes": 1,
+            "pu_fo_prediction_reuse": True,
+        },
+        "metrics": copy.deepcopy(config["metrics"]),
+        "adaptation": {
+            "steps": 0,
+            "optimizer": None,
+            "loss": None,
+            "backward": False,
+            "target_labels_usage": "evaluation_only",
+        },
+    }
+    canonical_json = canonical_scientific_json(scientific_config)
+    full_sha256 = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    experiment_key = "__".join(
+        [
+            "no_tta",
+            "ttda",
+            data["dataset"],
+            f"s{int(data['source'])}-t{int(data['target'])}",
+            f"seed{int(config['seed'])}",
+            "source_only",
+            full_sha256[:12],
+        ]
+    )
+    return {
+        "experiment_key": experiment_key,
+        "experiment_config_sha256": full_sha256,
+        "scientific_config": scientific_config,
+    }
+
+
+def resolve_deit_ttda_source_only_identity(
+    config,
+    provided_key=None,
+    provided_sha256=None,
+):
+    computed = build_deit_ttda_source_only_identity(config)
+    if (provided_key is None) != (provided_sha256 is None):
+        raise ValueError(
+            "experiment_key and experiment_config_sha256 must be "
+            "provided together"
+        )
+    if provided_key is not None:
+        if provided_key != computed["experiment_key"]:
+            raise ValueError(
+                "Provided experiment_key does not match the effective DeiT "
+                "TTDA source-only configuration"
+            )
+        if provided_sha256 != computed["experiment_config_sha256"]:
+            raise ValueError(
+                "Provided experiment_config_sha256 does not match the "
+                "effective DeiT TTDA source-only configuration"
+            )
+    return computed
