@@ -133,12 +133,18 @@ def main():
         flush=True,
     )
 
-    assignment = []
-    for index, job in enumerate(jobs):
-        gpu = gpus[index % len(gpus)]
-        assignment.append((gpu, job))
+    # Deduplicate GPU ids while preserving order.  A duplicated id would make
+    # the running/free bookkeeping (both keyed by GPU id) collide.
+    seen = set()
+    unique_gpus = []
+    for gpu in gpus:
+        if gpu not in seen:
+            seen.add(gpu)
+            unique_gpus.append(gpu)
+    gpus = unique_gpus
     if args.dry_run:
-        for gpu, job in assignment:
+        for index, job in enumerate(jobs):
+            gpu = gpus[index % len(gpus)]
             print(
                 f"  gpu {gpu:2d}  {job['variant']:<15} {job['dataset']:<8} "
                 f"s{job['source']}->t{job['target']}",
@@ -159,7 +165,7 @@ def main():
         if value is not None:
             overrides.extend([f"--{name}", str(value)])
 
-    pending = list(assignment)
+    pending = list(jobs)
     free_gpus = list(gpus)
     running = {}
     results = []
@@ -167,8 +173,8 @@ def main():
 
     while pending or running:
         while pending and free_gpus:
-            gpu, job = pending.pop(0)
-            free_gpus.remove(gpu)
+            job = pending.pop(0)
+            gpu = free_gpus.pop(0)
             task_name = f"{job['dataset']}_s{job['source']}_t{job['target']}"
             log_path = log_dir / f"{job['variant']}_{task_name}_gpu{gpu}.log"
             command = (
