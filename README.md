@@ -20,11 +20,12 @@ This repository studies sparse update-support discovery for test-time adaptation
 | Dense ResNet convolution updates | Indirectly included in `full_dense` |
 | Conv filter/channel Group Split-LBI | Not found in this repository |
 | DeiT-S source training | Implemented; all four server-side source checkpoints are reported complete |
-| DeiT-S TTA backbone integration | Not implemented |
+| DeiT-S TTDA source-only integration | Implemented and CPU-tested with synthetic checkpoints |
+| DeiT-S trainable TTDA / OTTA integration | Not implemented |
 | Transformer paired QK/VO/FFN groups | Not implemented |
-| TTDA | Not implemented |
+| TTDA | Source-only control only; adaptation is not implemented |
 
-This repository is therefore a reusable FC-OTTA engineering foundation, not an already completed FC + Conv + Transformer framework.
+This repository now also contains a strict DeiT TTDA source-only control, but it is not an already completed FC + Conv + Transformer adaptation framework.
 
 Two method-level decisions remain unresolved:
 
@@ -35,6 +36,7 @@ Two method-level decisions remain unresolved:
 
 ```text
 train.py                 Legacy single-run SHOT-OTTA entry point
+evaluate_deit_ttda.py    DeiT TTDA source-only evaluation entry point
 shot_otta/               Data, models, losses, trainer, and artifacts
 core/lbi/                Existing element-wise Split-LBI implementation
 source_training/         Legacy SHOT plus local-only DeiT source training
@@ -46,7 +48,7 @@ scripts/                 Maintenance utilities
 tests/                   Synthetic smoke and engineering tests
 ```
 
-The reusable pieces include the SHOT objective, image-list data pipeline, artifact system, experiment planning and launch infrastructure, summaries, and the broad LBI stage lifecycle. Transformer work still requires the TTA-side DeiT model adapter, structural group registry, group proximal operator, matched group selectors, Transformer-aware experiment identity, and TTDA support. The local-only DeiT source trainer and its checkpoint loader are now implemented independently of the legacy FC path.
+The reusable pieces include the SHOT objective, image-list data pipeline, artifact system, experiment planning and launch infrastructure, summaries, and the broad LBI stage lifecycle. The strict local DeiT adapter, Transformer-aware identity, and zero-adaptation TTDA evaluator are implemented. Transformer structural groups, group proximal operators, matched selectors, OTTA integration, and trainable TTDA remain future work.
 
 ## Installation
 
@@ -120,6 +122,71 @@ python train_source_deit.py --config configs/source_deit_office31.yaml --source-
 python train_source_deit.py --config configs/source_deit_visda.yaml --dry-run
 ```
 
+## DeiT TTDA Source-only Baseline
+
+This control evaluates the unchanged source checkpoint on the full target
+dataset. It creates no optimizer, computes no adaptation loss, performs no
+backward pass, and uses one prediction pass for both PU and FO. Macro
+per-class accuracy is the primary `PU-Acc`/`FO-Acc`; overall and per-class
+accuracies are also recorded. The evaluator verifies that PU and FO
+predictions are identical and that the complete model state hash is unchanged.
+
+Prepare the environment and generate the fixed seven-task plan:
+
+```bash
+export PROJECT_ROOT=/home/nas3/biod/wangkangyi/transformer-tta
+export RESULT_ROOT=/home/nas3/biod/wangkangyi/results/transformer_ttda_source_only
+export PYTHON_BIN=/home/nas3/biod/wangkangyi/envs/lbi/bin/python
+export HF_HOME=/home/nas3/biod/wangkangyi/hf-cache
+export TORCH_HOME=/home/nas3/biod/wangkangyi/hf-cache/torch
+export PIP_CACHE_DIR=/home/nas3/biod/wangkangyi/pip-cache
+export CONDA_PKGS_DIRS=/home/nas3/biod/wangkangyi/conda-pkgs
+export TMPDIR=/home/nas3/biod/wangkangyi/tmp
+export PLAN_PATH="$RESULT_ROOT/plans/deit_ttda_source_only.json"
+
+cd "$PROJECT_ROOT"
+"$PYTHON_BIN" tools/plan_deit_ttda_source_only.py \
+  --config configs/deit_ttda_source_only.yaml \
+  --matrix experiments/deit_ttda_source_only.yaml \
+  --output "$PLAN_PATH"
+
+"$PYTHON_BIN" tools/run_experiments_multi_gpu.py "$PLAN_PATH" \
+  --runs-root "$RESULT_ROOT/runs" \
+  --logs-root "$RESULT_ROOT/launcher_logs/full_dry_run" \
+  --workdir "$PROJECT_ROOT" \
+  --gpus 0,1,2,3,4,5,6 \
+  --max-workers 7 \
+  --workers-per-gpu 1 \
+  --dry-run
+```
+
+Run the required single-GPU A-to-D pilot, then the status-aware full matrix.
+The full launcher skips the already completed pilot automatically:
+
+```bash
+"$PYTHON_BIN" tools/run_experiments.py "$PLAN_PATH" \
+  --runs-root "$RESULT_ROOT/runs" \
+  --logs-root "$RESULT_ROOT/launcher_logs/pilot_AD" \
+  --workdir "$PROJECT_ROOT" \
+  --dataset office31 --source 0 --target 1 --max-experiments 1
+
+"$PYTHON_BIN" tools/run_experiments_multi_gpu.py "$PLAN_PATH" \
+  --runs-root "$RESULT_ROOT/runs" \
+  --logs-root "$RESULT_ROOT/launcher_logs/full" \
+  --workdir "$PROJECT_ROOT" \
+  --gpus 0,1,2,3,4,5,6 \
+  --max-workers 7 \
+  --workers-per-gpu 1
+
+"$PYTHON_BIN" tools/summarize_deit_ttda_source_only.py \
+  --plan "$PLAN_PATH" \
+  --runs-root "$RESULT_ROOT/runs" \
+  --output-dir "$RESULT_ROOT/summary"
+```
+
+These commands are provided for the user to execute on the server; Codex has
+not launched the real evaluations.
+
 ## Server Constraints
 
 The experiment server has eight RTX 3090 GPUs with 24 GB of memory each, but its primary disk is full. Code, data, checkpoints, environments, caches, temporary files, and experiment outputs must remain under:
@@ -128,7 +195,7 @@ The experiment server has eight RTX 3090 GPUs with 24 GB of memory each, but its
 /home/nas3/biod/wangkangyi/
 ```
 
-See `catalog.md` for the exact known paths. Model construction must not trigger implicit downloads. Set `HF_HOME`, `TORCH_HOME`, `PIP_CACHE_DIR`, `CONDA_PKGS_DIRS`, and `TMPDIR` to locations under the approved root. The formal output directory has not yet been defined and must be confirmed before large experiment launches.
+See `catalog.md` for the exact known paths. Model construction must not trigger implicit downloads. Set `HF_HOME`, `TORCH_HOME`, `PIP_CACHE_DIR`, `CONDA_PKGS_DIRS`, and `TMPDIR` to locations under the approved root. The TTDA source-only result root is frozen; output locations for later Transformer adaptation matrices remain undecided.
 
 ## Dependency Policy
 
