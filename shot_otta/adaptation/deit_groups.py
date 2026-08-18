@@ -80,6 +80,79 @@ def select_random_groups(total_groups, num_active, seed):
     return permutation[:num_active].tolist()
 
 
+def group_magnitude_scores(state_dict, *, candidate_blocks=DEFAULT_CANDIDATE_BLOCKS):
+    """Return per-group sum-of-|W| scores in canonical group order.
+
+    ``state_dict`` is a name -> tensor mapping (e.g. the W0 snapshot taken
+    before adaptation).  Q-K uses ``|Q row| + |K row|``, V-O uses
+    ``|V row| + |proj column|`` and FFN uses ``|fc1 row| + |fc2 column|``.
+    Every paired group contains exactly ``2d = 768`` scalars, so sum and mean
+    produce the identical Top-K ranking.
+    """
+    block_scores = []
+    for block in candidate_blocks:
+        block = int(block)
+        qkv = (
+            state_dict[f"blocks.{block}.attn.qkv.weight"]
+            .detach()
+            .to(torch.float64)
+        )
+        proj = (
+            state_dict[f"blocks.{block}.attn.proj.weight"]
+            .detach()
+            .to(torch.float64)
+        )
+        fc1 = (
+            state_dict[f"blocks.{block}.mlp.fc1.weight"]
+            .detach()
+            .to(torch.float64)
+        )
+        fc2 = (
+            state_dict[f"blocks.{block}.mlp.fc2.weight"]
+            .detach()
+            .to(torch.float64)
+        )
+        qk_scores = qkv[0:D].abs().sum(dim=1) + qkv[D : 2 * D].abs().sum(dim=1)
+        vo_scores = qkv[2 * D : 3 * D].abs().sum(dim=1) + proj.abs().sum(dim=0)
+        ffn_scores = fc1.abs().sum(dim=1) + fc2.abs().sum(dim=0)
+        block_scores.append(torch.cat((qk_scores, vo_scores, ffn_scores)))
+    return torch.cat(block_scores)
+
+
+def select_top_magnitude_groups(scores, num_active):
+    """Select the ``num_active`` largest score indices from ``scores``.
+
+    Ties are broken by ``torch.topk`` sorted index order, which is
+    deterministic for a fixed input tensor.
+    """
+    total_groups = int(scores.numel())
+    if isinstance(num_active, bool) or int(num_active) != num_active:
+        raise ValueError("num_active must be an integer")
+    num_active = int(num_active)
+    if not 0 <= num_active <= total_groups:
+        raise ValueError("num_active must be in [0, total_groups]")
+    if num_active == 0:
+        return []
+    if num_active == total_groups:
+        return list(range(total_groups))
+    topk = torch.topk(scores, num_active, largest=True, sorted=True)
+    return topk.indices.detach().cpu().tolist()
+
+
+def select_magnitude_groups(
+    state_dict, num_active, *, candidate_blocks=DEFAULT_CANDIDATE_BLOCKS
+):
+    """Select the ``num_active`` groups with the largest sum-of-|W| score.
+
+    The ranking depends only on W0, so it is fully deterministic for a fixed
+    source checkpoint; ties are broken by ``torch.topk`` sorted index order.
+    """
+    scores = group_magnitude_scores(
+        state_dict, candidate_blocks=candidate_blocks
+    )
+    return select_top_magnitude_groups(scores, num_active)
+
+
 def _new_mask_dict(candidate_blocks=DEFAULT_CANDIDATE_BLOCKS):
     masks = {}
     for block in candidate_blocks:

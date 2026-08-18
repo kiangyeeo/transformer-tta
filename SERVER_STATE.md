@@ -118,6 +118,29 @@ that trained the classifier were archived under
 and are superseded; the candidate-dense runs remain valid.  The re-run of
 full-dense with the frozen head has not been launched by Codex.
 
+## OTTA Group-magnitude Output
+
+The DeiT OTTA magnitude structural-group baseline is implemented locally but
+not yet run on the server. It uses the same sequential-stream protocol as the
+other trainable OTTA paths, but selects the
+`ceil(budget * 6912)` paired Q-K / V-O / FFN groups with the largest sum of
+`|W|` over each group's 768 scalars, computed once from W0 before adaptation;
+the mask is then fixed (`delta_semantics: strict_masked_delta`). AdamW is
+frozen in the config as `lr=1.0e-5`, `betas=[0.9, 0.999]`, `eps=1.0e-8`,
+`weight_decay=0.01`, one step per batch, model mode `eval`.
+
+The default result root is:
+
+`/home/nas3/biod/wangkangyi/results/transformer_otta_group_magnitude/`
+
+A lightweight GPU scheduler is available at
+`tools/run_deit_otta_magnitude_multi_gpu.py`; by default it schedules the
+seven OTTA directions for each of `0.005, 0.01, 0.02, 0.001, 0.003` budgets
+(35 jobs) across GPUs 0-7 with one subprocess per GPU and per-job logs under
+`<output.root>/launcher_logs/`. It has not been launched by Codex. This root
+is the implementation default only; it has not been frozen as the formal
+trainable-OTTA output root.
+
 ## Server Boundary
 
 All server assets remain under `/home/nas3/biod/wangkangyi/`. In particular:
