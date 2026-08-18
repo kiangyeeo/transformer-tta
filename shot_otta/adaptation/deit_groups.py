@@ -119,7 +119,7 @@ def group_magnitude_scores(state_dict, *, candidate_blocks=DEFAULT_CANDIDATE_BLO
     return torch.cat(block_scores)
 
 
-def select_top_magnitude_groups(scores, num_active):
+def select_top_groups(scores, num_active):
     """Select the ``num_active`` largest score indices from ``scores``.
 
     Ties are broken by ``torch.topk`` sorted index order, which is
@@ -150,7 +150,51 @@ def select_magnitude_groups(
     scores = group_magnitude_scores(
         state_dict, candidate_blocks=candidate_blocks
     )
-    return select_top_magnitude_groups(scores, num_active)
+    return select_top_groups(scores, num_active)
+
+
+def group_gradient_saliency_scores(
+    grads, *, candidate_blocks=DEFAULT_CANDIDATE_BLOCKS
+):
+    """Return per-group saliency scores from per-parameter gradients.
+
+    ``grads`` is a name -> gradient tensor mapping taken right after the TTA
+    loss backward.  The score of a paired group is the L2 (Frobenius) norm of
+    the group's gradient: ``s_g = || grad_g ||_2`` over both paired slices.
+    """
+    block_scores = []
+    for block in candidate_blocks:
+        block = int(block)
+        qkv = (
+            grads[f"blocks.{block}.attn.qkv.weight"]
+            .detach()
+            .to(torch.float64)
+        )
+        proj = (
+            grads[f"blocks.{block}.attn.proj.weight"]
+            .detach()
+            .to(torch.float64)
+        )
+        fc1 = (
+            grads[f"blocks.{block}.mlp.fc1.weight"]
+            .detach()
+            .to(torch.float64)
+        )
+        fc2 = (
+            grads[f"blocks.{block}.mlp.fc2.weight"]
+            .detach()
+            .to(torch.float64)
+        )
+        qk_scores = (
+            qkv[0:D].pow(2).sum(dim=1)
+            + qkv[D : 2 * D].pow(2).sum(dim=1)
+        ).sqrt()
+        vo_scores = (
+            qkv[2 * D : 3 * D].pow(2).sum(dim=1) + proj.pow(2).sum(dim=0)
+        ).sqrt()
+        ffn_scores = (fc1.pow(2).sum(dim=1) + fc2.pow(2).sum(dim=0)).sqrt()
+        block_scores.append(torch.cat((qk_scores, vo_scores, ffn_scores)))
+    return torch.cat(block_scores)
 
 
 def _new_mask_dict(candidate_blocks=DEFAULT_CANDIDATE_BLOCKS):

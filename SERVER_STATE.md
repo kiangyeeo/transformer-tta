@@ -141,6 +141,30 @@ seven OTTA directions for each of `0.005, 0.01, 0.02, 0.001, 0.003` budgets
 is the implementation default only; it has not been frozen as the formal
 trainable-OTTA output root.
 
+## OTTA Group-saliency Output
+
+The DeiT OTTA saliency structural-group baseline is implemented locally but
+not yet run on the server. It uses the same sequential-stream protocol, but
+after every TTA-loss backward it scores the paired Q-K / V-O / FFN groups by
+the L2 norm of their gradients (`gradient_l2_norm`) and updates the
+`ceil(budget * 6912)` highest-scoring groups with AdamW. The mask is rebuilt
+every online step (`delta_semantics: per_step_masked_accumulation`), so
+previously selected groups retain their accumulated updates. AdamW is frozen
+in the config as `lr=1.0e-5`, `betas=[0.9, 0.999]`, `eps=1.0e-8`,
+`weight_decay=0.01`, one step per batch, model mode `eval`.
+
+The default result root is:
+
+`/home/nas3/biod/wangkangyi/results/transformer_otta_group_saliency/`
+
+A lightweight GPU scheduler is available at
+`tools/run_deit_otta_saliency_multi_gpu.py`; by default it schedules the seven
+OTTA directions for each of `0.005, 0.01, 0.02, 0.001, 0.003` budgets (35
+jobs) across GPUs 0-7 with one subprocess per GPU and per-job logs under
+`<output.root>/launcher_logs/`. It has not been launched by Codex. This root
+is the implementation default only; it has not been frozen as the formal
+trainable-OTTA output root.
+
 ## Server Boundary
 
 All server assets remain under `/home/nas3/biod/wangkangyi/`. In particular:

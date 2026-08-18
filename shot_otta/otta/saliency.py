@@ -1,10 +1,12 @@
-"""Sequential DeiT OTTA magnitude structural-group baseline.
+"""Sequential DeiT OTTA saliency structural-group baseline.
 
-Selects ``active_groups = ceil(budget * total_groups)`` paired Q-K / V-O /
-FFN groups once before the stream by the largest sum of |W| over each group's
-2d scalars, computed from the source W0.  The mask is then fixed and only
-those groups are adapted with the SHOT objective + AdamW.  Masked-out
-candidate scalars stay exactly at W0 (``strict_masked_delta``).
+After every TTA-loss backward, each paired Q-K / V-O / FFN group is scored by
+the L2 norm of its gradient (``gradient_l2_norm``) and the
+``active_groups = ceil(budget * total_groups)`` highest-scoring groups are
+updated with the SHOT objective + AdamW.  The mask is rebuilt every online
+step; positions outside the current step's mask keep their pre-step values
+(``per_step_masked_accumulation``), so previously selected groups retain their
+accumulated updates without being reset to W0.
 """
 
 import copy
@@ -21,7 +23,7 @@ from shot_otta.adaptation.deit_groups import (
     active_group_count,
     build_group_mask_dict,
     count_active_scalars,
-    group_magnitude_scores,
+    group_gradient_saliency_scores,
     select_top_groups,
     total_group_count,
 )
@@ -53,9 +55,9 @@ from shot_otta.deit_source_only.runtime import (
     utc_now,
 )
 from shot_otta.losses import deit_shot_adaptation_loss
-from shot_otta.otta.magnitude_config import experiment_output_root
+from shot_otta.otta.saliency_config import experiment_output_root
 
-MAGNITUDE_PROTOCOL = "sequential_target_stream_group_magnitude_adaptation"
+SALIENCY_PROTOCOL = "sequential_target_stream_group_saliency_adaptation"
 
 
 def _delta_stats(model, initial_state):
@@ -78,11 +80,12 @@ def _delta_stats(model, initial_state):
 
 
 def _masked_optimizer_step(optimizer, parameter_lookup, masks, scaler=None):
-    """AdamW step restricted to the static group mask.
+    """AdamW step restricted to the current step's group mask.
 
     Gradients outside the mask are zeroed before the step and masked-out
-    positions are restored to their pre-step values afterwards, so they stay
-    exactly at W0 across the whole stream (strict masked delta semantics).
+    positions are restored to their pre-step values afterwards.  This confines
+    the current step's update to the selected groups while preserving any
+    accumulated updates on previously selected groups.
     """
     pre_step = {}
     with torch.no_grad():
@@ -114,23 +117,21 @@ def _masked_optimizer_step(optimizer, parameter_lookup, masks, scaler=None):
             )
 
 
-def run_deit_otta_magnitude_experiment(
+def run_deit_otta_saliency_experiment(
     config, project_root, *, model_factory=None
 ):
-    """Run the DeiT OTTA magnitude structural-group baseline.
+    """Run the DeiT OTTA saliency structural-group baseline.
 
-    Protocol: sequential target stream.  The Top-K groups by W0 |W|-sum are
-    selected once before adaptation and fixed.  Every batch runs
-    ``steps_per_batch`` AdamW updates on the SHOT objective restricted to
-    those groups; the updated model then predicts the same batch (PU).  After
-    the stream the model is frozen and an independent full-target pass
-    produces FO metrics.
+    Protocol: sequential target stream.  Every online step runs a SHOT-loss
+    backward, scores the paired groups by gradient L2 norm, and updates the
+    Top-K groups with AdamW; the updated model then predicts the same batch
+    (PU).  After the stream the model is frozen and an independent
+    full-target pass produces FO metrics.
     """
     variant = config.get("variant")
-    if config.get("task") != "otta" or variant != "group_magnitude":
+    if config.get("task") != "otta" or variant != "group_saliency":
         raise ValueError(
-            "magnitude runner requires task=otta and "
-            "variant=group_magnitude"
+            "saliency runner requires task=otta and variant=group_saliency"
         )
     output_root = experiment_output_root(config)
     run_id, output_dir = create_run_dir(
@@ -143,7 +144,7 @@ def run_deit_otta_magnitude_experiment(
         "manifest": osp.join(output_dir, "manifest.json"),
         "metrics": osp.join(output_dir, "metrics.jsonl"),
         "summary": osp.join(output_dir, "summary.json"),
-        "mask": osp.join(output_dir, "mask.pt"),
+        "mask_union": osp.join(output_dir, "mask_union.pt"),
     }
     dump_yaml(paths["config"], config)
     started_at = utc_now()
@@ -153,15 +154,15 @@ def run_deit_otta_magnitude_experiment(
     candidate_names = sorted(candidate_parameter_names(candidate_blocks))
     total_groups = total_group_count(candidate_blocks)
     num_active = active_group_count(config["adaptation"]["budget"], total_groups)
-    group_score = config["adaptation"]["group_score"]
+    saliency_score = config["adaptation"]["saliency_score"]
     base_manifest = {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
         "run_id": run_id,
         "created_at_utc": started_at,
         "method": "shot",
         "task": "otta",
-        "protocol": MAGNITUDE_PROTOCOL,
-        "variant": "group_magnitude",
+        "protocol": SALIENCY_PROTOCOL,
+        "variant": "group_saliency",
         "dataset": config["data"]["dataset"],
         "source": config["data"]["source"],
         "target": config["data"]["target"],
@@ -191,11 +192,11 @@ def run_deit_otta_magnitude_experiment(
             "steps_per_batch": steps_per_batch,
             "delta_semantics": config["adaptation"]["delta_semantics"],
             "grouping": config["adaptation"]["grouping"],
-            "selection": "magnitude",
-            "group_score": group_score,
-            "mask_static": True,
-            "mask_refresh_policy": "once_before_adaptation",
-            "ranking_source": "source_checkpoint_pre_adaptation",
+            "selection": "saliency",
+            "saliency_score": saliency_score,
+            "mask_static": False,
+            "mask_refresh_policy": "every_online_step_after_backward",
+            "ranking_source": "current_gradient_after_backward",
             "budget": config["adaptation"]["budget"],
             "budget_unit": "structural_groups",
             "total_groups": total_groups,
@@ -229,7 +230,7 @@ def run_deit_otta_magnitude_experiment(
             config["seed"], config["evaluation"]["deterministic"]
         )
         print(
-            f"[group_magnitude] loading source checkpoint: "
+            f"[group_saliency] loading source checkpoint: "
             f"{config['source_checkpoint']['path']}",
             flush=True,
         )
@@ -246,47 +247,18 @@ def run_deit_otta_magnitude_experiment(
             for name, parameter in model.named_parameters()
             if name in set(candidate_names)
         )
-
-        scores = group_magnitude_scores(
-            initial_state, candidate_blocks=candidate_blocks
-        )
-        selected_groups = select_top_groups(scores, num_active)
-        masks = build_group_mask_dict(
-            selected_groups, candidate_blocks=candidate_blocks
-        )
-        masks = {
-            name: mask.to(device=device)
-            for name, mask in masks.items()
-        }
-        active_scalars = count_active_scalars(masks)
-        if active_scalars != num_active * 2 * 384:
-            raise RuntimeError(
-                "Group mask scalar count does not match active group count"
-            )
         named_parameters = dict(model.named_parameters())
         parameter_lookup = {}
-        for name, mask in masks.items():
+        for name in candidate_names:
             parameter = named_parameters.get(name)
             if parameter is None:
                 raise RuntimeError(f"Candidate parameter missing: {name}")
-            if tuple(mask.shape) != tuple(parameter.shape):
-                raise RuntimeError(
-                    f"Mask shape mismatch for {name}: "
-                    f"{tuple(mask.shape)} vs {tuple(parameter.shape)}"
-                )
             parameter_lookup[name] = parameter
-        torch.save(
-            {name: mask.detach().cpu() for name, mask in masks.items()},
-            paths["mask"],
-        )
-        selected_scores = [
-            float(scores[int(index)].item()) for index in selected_groups
-        ]
+        active_scalars = num_active * 2 * 384
         print(
-            f"[group_magnitude] active_groups={num_active}/{total_groups} "
-            f"active_scalars={active_scalars}/{candidate_scalars} "
-            f"min_score={min(selected_scores):.6g} "
-            f"max_score={max(selected_scores):.6g}",
+            f"[group_saliency] active_groups_per_step={num_active}/"
+            f"{total_groups} active_scalars_per_step={active_scalars}/"
+            f"{candidate_scalars}",
             flush=True,
         )
 
@@ -306,6 +278,7 @@ def run_deit_otta_magnitude_experiment(
         batch_sample_counts = []
         backward_calls = 0
         total_steps = 0
+        selected_groups_union = set()
 
         def record_batch(
             stream_batch, labels, predictions, indices, loss, loss_stats
@@ -337,8 +310,8 @@ def run_deit_otta_magnitude_experiment(
                     "optimizer_created": True,
                     "loss_computed": True,
                     "model_update_applied": True,
-                    "mask_static": True,
-                    "mask_refresh_policy": "once_before_adaptation",
+                    "mask_static": False,
+                    "mask_refresh_policy": "every_online_step_after_backward",
                     "active_groups": num_active,
                     "candidate_groups": total_groups,
                     "active_scalars": active_scalars,
@@ -357,7 +330,7 @@ def run_deit_otta_magnitude_experiment(
         stream = tqdm(
             loader,
             total=len(loader),
-            desc="OTTA adapt magnitude",
+            desc="OTTA adapt saliency",
             file=sys.stdout,
             dynamic_ncols=True,
             mininterval=1.0,
@@ -376,12 +349,39 @@ def run_deit_otta_magnitude_experiment(
                     )
                 if scaler is not None:
                     scaler.scale(batch_loss).backward()
+                else:
+                    batch_loss.backward()
+
+                grads = {}
+                for name in candidate_names:
+                    gradient = named_parameters[name].grad
+                    if gradient is None:
+                        raise RuntimeError(
+                            f"Candidate parameter has no gradient: {name}"
+                        )
+                    grads[name] = gradient
+                scores = group_gradient_saliency_scores(
+                    grads, candidate_blocks=candidate_blocks
+                )
+                selected_groups = select_top_groups(scores, num_active)
+                selected_groups_union.update(int(g) for g in selected_groups)
+                masks = build_group_mask_dict(
+                    selected_groups, candidate_blocks=candidate_blocks
+                )
+                masks = {
+                    name: mask.to(device=device)
+                    for name, mask in masks.items()
+                }
+                if count_active_scalars(masks) != active_scalars:
+                    raise RuntimeError(
+                        "Group mask scalar count does not match active groups"
+                    )
+                if scaler is not None:
                     _masked_optimizer_step(
                         optimizer, parameter_lookup, masks, scaler=scaler
                     )
                     scaler.update()
                 else:
-                    batch_loss.backward()
                     _masked_optimizer_step(
                         optimizer, parameter_lookup, masks
                     )
@@ -420,38 +420,36 @@ def run_deit_otta_magnitude_experiment(
         state_after_stream = hash_model_state(model)
         if state_after_stream == state_before:
             raise RuntimeError(
-                "group-magnitude OTTA stream did not modify model state"
+                "group-saliency OTTA stream did not modify model state"
             )
         delta_stats = _delta_stats(model, initial_state)
-        # strict_masked_delta only requires masked-OUT positions to stay at
-        # W0.  Active positions may legitimately end with zero change, so the
-        # set of changed scalars is a subset of the active set.
-        masked_out_changed = 0
-        for name, mask in masks.items():
-            parameter = named_parameters[name]
-            difference = parameter.detach() - initial_state[name].to(
-                parameter.device
-            )
-            changed = difference != 0
-            masked_out_changed += int(changed[~mask].sum().item())
-        if masked_out_changed != 0:
+        selected_groups_union = sorted(selected_groups_union)
+        union_count = len(selected_groups_union)
+        # Only groups selected in at least one step can have changed; each
+        # paired group covers exactly 768 scalars.
+        if delta_stats["delta_nonzero_scalars"] > union_count * 2 * 384:
             raise RuntimeError(
-                "strict_masked_delta violated: "
-                f"{masked_out_changed} masked-out scalars changed"
+                "delta_nonzero_scalars exceeds the selected-group union "
+                f"bound: {delta_stats['delta_nonzero_scalars']} > "
+                f"{union_count} groups x 768 = {union_count * 2 * 384}"
             )
-        if delta_stats["delta_nonzero_scalars"] > active_scalars:
-            raise RuntimeError(
-                "strict_masked_delta violated: nonzero delta scalars "
-                f"{delta_stats['delta_nonzero_scalars']} > active scalars "
-                f"{active_scalars}"
-            )
+        union_masks = build_group_mask_dict(
+            selected_groups_union, candidate_blocks=candidate_blocks
+        )
+        torch.save(
+            {
+                name: mask.detach().cpu()
+                for name, mask in union_masks.items()
+            },
+            paths["mask_union"],
+        )
 
         optimizer.zero_grad(set_to_none=True)
         model.requires_grad_(False)
         model.eval()
         if any(parameter.grad is not None for parameter in model.parameters()):
             raise RuntimeError(
-                "group-magnitude OTTA left non-None gradients after stream"
+                "group-saliency OTTA left non-None gradients after stream"
             )
         fo_labels, fo_predictions, fo_indices = evaluate_model(
             model,
@@ -542,8 +540,8 @@ def run_deit_otta_magnitude_experiment(
             "active_groups": num_active,
             "candidate_groups": total_groups,
             "active_scalars": active_scalars,
-            "selected_groups": selected_groups,
-            "selected_group_scores": selected_scores,
+            "selected_groups_union_count": union_count,
+            "selected_groups_union": selected_groups_union,
         }
         final_record = {
             "schema_version": ARTIFACT_SCHEMA_VERSION,
@@ -565,9 +563,9 @@ def run_deit_otta_magnitude_experiment(
             "run_id": run_id,
             "output_dir": output_dir,
             "method": "shot",
-            "variant": "group_magnitude",
+            "variant": "group_saliency",
             "task": "otta",
-            "protocol": MAGNITUDE_PROTOCOL,
+            "protocol": SALIENCY_PROTOCOL,
             "dataset": config["data"]["dataset"],
             "source": config["data"]["source"],
             "target": config["data"]["target"],
@@ -592,13 +590,13 @@ def run_deit_otta_magnitude_experiment(
             ],
             "source_best": config["source_checkpoint"]["best"],
             "budget": config["adaptation"]["budget"],
-            "group_score": group_score,
+            "saliency_score": saliency_score,
             "candidate_groups": total_groups,
             "active_groups": num_active,
             "candidate_scalars": candidate_scalars,
             "active_scalars": active_scalars,
-            "selected_groups": selected_groups,
-            "selected_group_scores": selected_scores,
+            "selected_groups_union_count": union_count,
+            "selected_groups_union": selected_groups_union,
             "adaptation": copy.deepcopy(base_manifest["adaptation"]),
             "optimization": copy.deepcopy(config["optimization"]),
             "loss": copy.deepcopy(config["loss"]),
@@ -624,8 +622,9 @@ def run_deit_otta_magnitude_experiment(
             },
         )
         print(
-            f"[group_magnitude] PU-Acc={summary['PU-Acc']} "
-            f"FO-Acc={summary['FO-Acc']} runtime={runtime}",
+            f"[group_saliency] PU-Acc={summary['PU-Acc']} "
+            f"FO-Acc={summary['FO-Acc']} "
+            f"union_groups={union_count} runtime={runtime}",
             flush=True,
         )
         return summary
@@ -641,7 +640,7 @@ def run_deit_otta_magnitude_experiment(
                     "experiment_config_sha256"
                 ],
                 "method": "shot",
-                "variant": "group_magnitude",
+                "variant": "group_saliency",
                 "task": "otta",
                 "dataset": config["data"]["dataset"],
                 "source": config["data"]["source"],
