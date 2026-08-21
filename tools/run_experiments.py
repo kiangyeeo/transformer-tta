@@ -37,6 +37,7 @@ BLOCKING_PRE_RUN_STATUSES = {
     "invalid_summary",
 }
 SUMMARY_FIELDS = [
+    "implementation_revision",
     "experiment_key",
     "experiment_config_sha256",
     "command_args",
@@ -172,6 +173,9 @@ def _base_record(experiment, pre_run_status):
             f"Invalid command_args for {experiment['experiment_key']}"
         )
     return {
+        "implementation_revision": experiment.get(
+            "implementation_revision"
+        ),
         "experiment_key": experiment["experiment_key"],
         "experiment_config_sha256": experiment[
             "experiment_config_sha256"
@@ -408,11 +412,6 @@ def run_launcher(
 ):
     if max_experiments is not None and max_experiments <= 0:
         raise ValueError("max_experiments must be greater than 0")
-    if summarize_after_run and plan.get("supports_generic_summary") is False:
-        raise ValueError(
-            "This plan requires its task-specific summary tool; "
-            "do not use --summarize-after-run"
-        )
     runs_root = Path(runs_root).resolve()
     workdir = Path(workdir or Path.cwd()).resolve()
     logs_root = Path(

@@ -10,6 +10,7 @@ import sys
 from datetime import datetime, timezone
 
 from .config import dump_yaml
+from protocol_constants import PROTOCOL_REVISION, SOURCE_CHECKPOINT_REVISION
 
 
 SCHEMA_VERSION = 9
@@ -165,10 +166,22 @@ def write_initial_artifacts(
         "source_name": config["data"]["source_name"],
         "target_name": config["data"]["target_name"],
         "seed": config["seed"],
+        "implementation_revision": config["implementation_revision"],
+        "protocol_revision": config.get("protocol_revision", PROTOCOL_REVISION),
+        "source_checkpoint_revision": config.get(
+            "source_checkpoint_revision", SOURCE_CHECKPOINT_REVISION
+        ),
         "experiment_key": config["experiment_key"],
         "experiment_config_sha256": config[
             "experiment_config_sha256"
         ],
+        "efficiency_protocol_revision": config.get("runtime", {}).get(
+            "efficiency_protocol_revision"
+        ),
+        "runtime_comparable": config.get("runtime", {}).get(
+            "runtime_comparable", False
+        ),
+        "scientific_config": config["scientific_config"],
         "command": sys.argv,
         "effective_config_sha256": config_sha256(config),
         "git": git_info(workspace_root),

@@ -27,7 +27,7 @@ def _experiment(
     dataset="office",
     source=0,
     target=1,
-    seed=2020,
+    seed=2026,
     budget=None,
     command_args=None,
 ):

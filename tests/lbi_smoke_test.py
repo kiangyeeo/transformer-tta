@@ -8,6 +8,7 @@ import os
 import os.path as osp
 import sys
 import tempfile
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -21,6 +22,7 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from core.lbi import SplitLBIEngine  # noqa: E402
+import core.lbi.engine as lbi_engine_module  # noqa: E402
 from experiment_identity import build_experiment_identity  # noqa: E402
 from shot_otta.config import load_yaml, resolve_effective_config  # noqa: E402
 from shot_otta.trainer import (  # noqa: E402
@@ -47,6 +49,7 @@ def _config(**overrides):
         "stage2_lr": 0.01,
         "stage2_steps": 1,
         "delta_nonzero_tolerance": 1.0e-12,
+        "support_threshold": 1.0e-4,
         "requested_budget": 0.5,
     }
     config.update(overrides)
@@ -96,21 +99,26 @@ def _check_one_step_math():
         kappa=1.5,
         nu=2.0,
         requested_budget=0.5,
-        stage1_max_steps=1,
+        stage1_max_steps=2,
     )
     result = SplitLBIEngine(parameter.numel()).run_step(
         named,
         _linear_closure(named, gradients),
         config,
     )
-    expected_theta = -0.2 * 1.5 * gradients["weight"]
-    expected_z = 0.2 * expected_theta / 2.0
+    theta_after_first = -0.2 * 1.5 * gradients["weight"]
+    old_coupling_second = theta_after_first / 2.0
+    expected_theta = theta_after_first - 0.2 * 1.5 * (
+        gradients["weight"] + old_coupling_second
+    )
+    # Eq. (5): z^2 consumes c^1, calculated before theta_delta^2.
+    expected_z = 0.2 * old_coupling_second
     expected_gamma = (
         1.5
         * torch.sign(expected_z)
         * torch.clamp(expected_z.abs() - 1.0, min=0.0)
     )
-    assert result.statistics["stage1_steps_completed"] == 1
+    assert result.statistics["stage1_steps_completed"] == 2
     assert result.statistics["stage1_branch_enabled"] is True
     assert torch.allclose(
         result.state.theta_delta["weight"], expected_theta
@@ -156,26 +164,28 @@ def _check_budget_and_rollback():
     parameter = nn.Parameter(torch.zeros(4))
     named = [("weight", parameter)]
     gradients = {
-        "weight": torch.tensor([-2.0, -0.6, -0.6, -0.6])
+        "weight": torch.tensor([-2.0, -2.0, -2.0, -0.1])
     }
     result = SplitLBIEngine(8).run_step(
         named,
         _linear_closure(named, gradients),
         _config(
             alpha=1.0,
-            requested_budget=0.5,
+            requested_budget=0.25,
             stage1_max_steps=5,
             omega=1.0,
         ),
     )
     assert result.statistics["stage1_steps_completed"] == 2
-    assert result.statistics["stage1_stop_reason"] == "rollback_feasible"
+    assert result.statistics["stage1_stop_reason"] == "strict_budget_rollback"
     assert result.statistics["stage1_rollback_used"] is True
     assert result.statistics["stage1_last_feasible_step"] == 1
-    assert result.statistics["stage1_support_count"] == 1
-    assert result.statistics["stage1_support_ratio"] == 0.25
-    assert result.statistics["support_over_model_ratio"] == 0.125
-    assert int(result.state.mask["weight"].count_nonzero()) == 1
+    # The second step jumps from zero support to 3/4.  The strict-budget
+    # variant retains the initial feasible state instead of overshooting.
+    assert result.statistics["stage1_support_count"] == 0
+    assert result.statistics["stage1_support_ratio"] == 0.0
+    assert result.statistics["support_over_model_ratio"] == 0.0
+    assert int(result.state.mask["weight"].count_nonzero()) == 0
 
     slow_parameter = nn.Parameter(torch.zeros(3))
     slow_named = [("weight", slow_parameter)]
@@ -196,6 +206,7 @@ def _check_budget_and_rollback():
         == "max_steps_reached"
     )
     assert slow_result.statistics["stage1_support_count"] == 0
+    assert slow_result.statistics["stage1_rollback_used"] is False
 
     zero_budget_parameter = nn.Parameter(torch.tensor([1.0, -1.0]))
     zero_named = [("weight", zero_budget_parameter)]
@@ -239,13 +250,58 @@ def _check_budget_and_rollback():
             torch.count_nonzero(value).item() == 0
             for value in values.values()
         )
-    assert (
-        zero_result.statistics["effective_delta_nonzero_count"] > 0
-    )
-    assert not torch.equal(
+    assert zero_result.statistics["effective_delta_nonzero_count"] == 0
+    assert torch.equal(
         zero_result.applied_parameters["weight"],
         zero_result.base_parameters["weight"],
     )
+
+
+def _check_support_threshold_and_rollback_bookkeeping():
+    gradients = {"weight": torch.tensor([-1.5, -1.4])}
+
+    equality_parameter = nn.Parameter(torch.zeros(2))
+    equality_named = [("weight", equality_parameter)]
+    equality_result = SplitLBIEngine(2).run_step(
+        equality_named,
+        _linear_closure(equality_named, gradients),
+        _config(
+            alpha=1.0,
+            requested_budget=0.5,
+            stage1_max_steps=3,
+            support_threshold=0.5,
+        ),
+    )
+    # gamma is [0.5, 0.4], so equality with tau must remain selected.
+    assert torch.equal(
+        equality_result.state.mask["weight"],
+        torch.tensor([True, False]),
+    )
+    assert equality_result.statistics["stage1_support_count"] == 1
+    assert equality_result.statistics["selected_param_count"] == 1
+    assert equality_result.statistics["stage1_support_ratio"] == 0.5
+    assert equality_result.statistics["stage1_stop_reason"] == "budget_reached"
+    assert equality_result.statistics["stage1_rollback_used"] is False
+
+    higher_tau_parameter = nn.Parameter(torch.zeros(2))
+    higher_tau_named = [("weight", higher_tau_parameter)]
+    higher_tau_result = SplitLBIEngine(2).run_step(
+        higher_tau_named,
+        _linear_closure(higher_tau_named, gradients),
+        _config(
+            alpha=1.0,
+            requested_budget=1.0,
+            stage1_max_steps=2,
+            support_threshold=0.6,
+        ),
+    )
+    # The same gamma is entirely below tau=0.6, proving Stage-1 counting
+    # and the final Stage-2 mask share the configured threshold.
+    assert torch.count_nonzero(higher_tau_result.state.mask["weight"]) == 0
+    assert higher_tau_result.statistics["stage1_support_count"] == 0
+    assert higher_tau_result.statistics["selected_param_count"] == 0
+    assert higher_tau_result.statistics["stage1_stop_reason"] == "max_steps_reached"
+    assert higher_tau_result.statistics["stage1_rollback_used"] is False
 
 
 def _check_stage2_and_stage3():
@@ -267,16 +323,11 @@ def _check_stage2_and_stage3():
     assert result.statistics["stage2_optimizer"] == "sgd"
     assert int(result.state.mask["weight"].count_nonzero()) == 0
     assert torch.count_nonzero(parameter.grad).item() == 0
-    assert torch.count_nonzero(
-        result.state.theta_delta["weight"]
-    ).item() > 0
-    assert torch.count_nonzero(
-        (
-            result.refined_parameters["weight"]
-            - result.base_parameters["weight"]
-        ).abs()
-        > 1.0e-12
-    ).item() == result.statistics["effective_delta_nonzero_count"]
+    assert torch.count_nonzero(result.state.theta_delta["weight"]).item() > 0
+    assert result.statistics["effective_delta_nonzero_count"] == 0
+    assert torch.equal(
+        result.refined_parameters["weight"], result.base_parameters["weight"]
+    )
     expected_applied = (
         0.75 * result.base_parameters["weight"]
         + 0.25 * result.refined_parameters["weight"]
@@ -306,8 +357,87 @@ def _check_stage2_and_stage3():
             )
 
 
-def _legacy_reference(named_parameters, targets, config, total_count):
-    """Small CPU harness transcribed from old split_lbi_otta.py."""
+def _record_stage2_lrs(stage2_steps):
+    parameter = nn.Parameter(torch.tensor([0.5, -0.5]))
+    named = [("weight", parameter)]
+    recorded_lrs = []
+    original_sgd = lbi_engine_module.optim.SGD
+
+    def recording_sgd(*args, **kwargs):
+        optimizer = original_sgd(*args, **kwargs)
+        original_step = optimizer.step
+
+        def recording_step(*step_args, **step_kwargs):
+            recorded_lrs.extend(
+                group["lr"] for group in optimizer.param_groups
+            )
+            return original_step(*step_args, **step_kwargs)
+
+        optimizer.step = recording_step
+        return optimizer
+
+    with patch.object(lbi_engine_module.optim, "SGD", recording_sgd):
+        result = SplitLBIEngine(parameter.numel()).run_step(
+            named,
+            _linear_closure(
+                named, {"weight": torch.tensor([0.2, -0.3])}
+            ),
+            _config(requested_budget=0.0, stage2_steps=stage2_steps),
+        )
+    return result, recorded_lrs
+
+
+def _check_stage2_fixed_learning_rate():
+    for stage2_steps in (1, 3):
+        result, recorded_lrs = _record_stage2_lrs(stage2_steps)
+        stage2_lr = 0.01
+        assert result.statistics["stage2_lr"] == stage2_lr
+        assert len(recorded_lrs) == stage2_steps
+        assert recorded_lrs == [stage2_lr] * stage2_steps
+    # A local SHOT schedule would use 0.01 * 11**(-0.75) on its first step.
+    assert not math.isclose(recorded_lrs[0], 0.01 * 11.0 ** (-0.75))
+
+
+def _check_masked_initialization_and_value_freezing():
+    parameter = nn.Parameter(torch.tensor([0.5, -0.5]))
+    named = [("weight", parameter)]
+    base = parameter.detach().clone()
+    closure_values = []
+
+    def closure():
+        closure_values.append(parameter.detach().clone())
+        return torch.sum(parameter * torch.tensor([-2.0, -0.1])), {}
+
+    result = SplitLBIEngine(parameter.numel()).run_step(
+        named,
+        closure,
+        _config(
+            alpha=1.0,
+            requested_budget=0.5,
+            stage1_max_steps=2,
+            stage2_steps=2,
+            omega=1.0,
+        ),
+    )
+
+    mask = result.state.mask["weight"]
+    assert torch.equal(mask, torch.tensor([True, False]))
+    assert result.state.theta_delta["weight"][1] != 0
+    # The final closure invocation is the first Stage-2 loss evaluation.
+    # Its mask-out value proves initialization used mask * theta_delta.
+    assert closure_values[2][1] == base[1]
+    assert torch.equal(
+        result.refined_parameters["weight"][~mask], base[~mask]
+    )
+    assert torch.equal(parameter.detach()[~mask], base[~mask])
+    assert (
+        result.statistics["effective_delta_nonzero_count"]
+        <= result.statistics["selected_param_count"]
+    )
+
+
+def _corrected_reference(named_parameters, targets, config, total_count):
+    """Small CPU harness for the corrected Split-LBI equations."""
     named_parameters = list(named_parameters)
     lookup = dict(named_parameters)
     base = {
@@ -329,8 +459,6 @@ def _legacy_reference(named_parameters, targets, config, total_count):
     candidate_count = sum(
         parameter.numel() for _, parameter in named_parameters
     )
-    # This mirrors the old FC branch flags rather than the new engine:
-    # fc_branch_enabled=(fc_total>0) and (rho_max_fc>0.0).
     branch_enabled = (
         candidate_count > 0 and config["requested_budget"] > 0.0
     )
@@ -338,8 +466,12 @@ def _legacy_reference(named_parameters, targets, config, total_count):
     close_step = 0 if branch_closed else None
     close_reason = "branch_disabled" if branch_closed else None
     rollback_used = False
-    feasible = None
-    feasible_step = 0 if branch_closed else None
+    feasible = {
+        "delta": {name: value.detach().clone() for name, value in delta.items()},
+        "gamma": {name: value.detach().clone() for name, value in gamma.items()},
+        "z": {name: value.detach().clone() for name, value in z.items()},
+    }
+    feasible_step = 0
     steps = 0
     stage1_final_loss = None
 
@@ -359,22 +491,20 @@ def _legacy_reference(named_parameters, targets, config, total_count):
             with torch.no_grad():
                 for name, parameter in named_parameters:
                     parameter.copy_(base[name])
+            old_coupling = {
+                name: (delta[name] - gamma[name]) / config["nu"]
+                for name, _ in named_parameters
+            }
             for (name, _), gradient in zip(
                 named_parameters, gradients
             ):
-                grad_reg = (
-                    delta[name] - gamma[name]
-                ) / config["nu"]
                 delta[name] = delta[name] - (
                     config["alpha"]
                     * config["kappa"]
-                    * (gradient + grad_reg)
+                    * (gradient + old_coupling[name])
                 )
             for name, _ in named_parameters:
-                grad_gamma = -(
-                    delta[name] - gamma[name]
-                ) / config["nu"]
-                z[name] = z[name] - config["alpha"] * grad_gamma
+                z[name] = z[name] + config["alpha"] * old_coupling[name]
             for name, _ in named_parameters:
                 z_value = z[name]
                 gamma[name] = (
@@ -385,7 +515,7 @@ def _legacy_reference(named_parameters, targets, config, total_count):
                     )
                 )
             mask = {
-                name: value.abs().gt(1.0e-4)
+                name: value.abs().ge(config["support_threshold"])
                 for name, value in gamma.items()
             }
             support = sum(
@@ -394,10 +524,7 @@ def _legacy_reference(named_parameters, targets, config, total_count):
             )
             density = support / candidate_count
             steps = step_index + 1
-            if density <= (
-                config["requested_budget"]
-                + config["budget_tolerance"]
-            ):
+            if density < config["requested_budget"]:
                 feasible = {
                     "delta": {
                         name: value.detach().clone()
@@ -413,32 +540,45 @@ def _legacy_reference(named_parameters, targets, config, total_count):
                     },
                 }
                 feasible_step = steps
-            if density >= config["requested_budget"]:
+            if density == config["requested_budget"]:
                 branch_closed = True
                 close_step = steps
-                close_reason = "cross_no_feasible"
-                if feasible is not None:
-                    delta = feasible["delta"]
-                    gamma = feasible["gamma"]
-                    z = feasible["z"]
-                    close_reason = "rollback_feasible"
-                    rollback_used = True
+                feasible = {
+                    "delta": {
+                        name: value.detach().clone()
+                        for name, value in delta.items()
+                    },
+                    "gamma": {
+                        name: value.detach().clone()
+                        for name, value in gamma.items()
+                    },
+                    "z": {
+                        name: value.detach().clone()
+                        for name, value in z.items()
+                    },
+                }
+                feasible_step = steps
+                close_reason = "budget_reached"
                 break
-        if not branch_closed:
-            close_reason = "max_steps_reached"
-            if feasible is not None:
+            if density > config["requested_budget"]:
+                branch_closed = True
+                close_step = steps
                 delta = feasible["delta"]
                 gamma = feasible["gamma"]
                 z = feasible["z"]
+                close_reason = "strict_budget_rollback"
                 rollback_used = True
+                break
+        if not branch_closed:
+            close_reason = "max_steps_reached"
 
     mask = {
-        name: value.abs().gt(1.0e-4)
+        name: value.abs().ge(config["support_threshold"])
         for name, value in gamma.items()
     }
     with torch.no_grad():
         for name, parameter in named_parameters:
-            parameter.copy_(base[name] + delta[name])
+            parameter.copy_(base[name] + mask[name] * delta[name])
     groups = [
         {"params": [parameter], "lr": config["stage2_lr"]}
         for _, parameter in named_parameters
@@ -449,19 +589,7 @@ def _legacy_reference(named_parameters, targets, config, total_count):
         weight_decay=1.0e-3,
         nesterov=True,
     )
-    for group in optimizer.param_groups:
-        group["lr0"] = group["lr"]
-    for stage2_index in range(config["stage2_steps"]):
-        decay = (
-            1.0
-            + 10.0
-            * (stage2_index + 1)
-            / config["stage2_steps"]
-        ) ** (-0.75)
-        for group in optimizer.param_groups:
-            group["lr"] = group["lr0"] * decay
-            group["momentum"] = 0.9
-            group["nesterov"] = True
+    for _ in range(config["stage2_steps"]):
         optimizer.zero_grad()
         loss = sum(
             torch.sum((lookup[name] - targets[name]) ** 2)
@@ -470,7 +598,14 @@ def _legacy_reference(named_parameters, targets, config, total_count):
         loss.backward()
         for name, parameter in named_parameters:
             parameter.grad.mul_(mask[name])
+        pre_step = {
+            name: parameter.detach().clone()
+            for name, parameter in named_parameters
+        }
         optimizer.step()
+        with torch.no_grad():
+            for name, parameter in named_parameters:
+                parameter.copy_(torch.where(mask[name], parameter, pre_step[name]))
     refined = {
         name: parameter.detach().clone()
         for name, parameter in named_parameters
@@ -538,7 +673,7 @@ def _legacy_reference(named_parameters, targets, config, total_count):
     }
 
 
-def _check_old_parity():
+def _check_corrected_reference_parity():
     initial = {
         "weight": torch.tensor([0.2, -0.3, 0.4, -0.1]),
         "bias": torch.tensor([0.05, -0.02]),
@@ -571,7 +706,7 @@ def _check_old_parity():
         _quadratic_closure(new_named, targets),
         config,
     )
-    old_result = _legacy_reference(
+    old_result = _corrected_reference(
         old_named, targets, config, total_count
     )
     assert (
@@ -628,7 +763,7 @@ def _check_old_parity():
         )
 
 
-def _check_zero_budget_old_parity():
+def _check_zero_budget_corrected_reference_parity():
     initial = {
         "weight": torch.tensor([0.8, -0.4, 0.2, -0.1]),
         "bias": torch.tensor([0.3, -0.6]),
@@ -657,7 +792,7 @@ def _check_zero_budget_old_parity():
         _quadratic_closure(new_named, targets),
         config,
     )
-    old_result = _legacy_reference(
+    old_result = _corrected_reference(
         old_named, targets, config, total_count
     )
     statistics = new_result.statistics
@@ -677,7 +812,7 @@ def _check_zero_budget_old_parity():
     assert statistics["selected_param_count"] == 0
     assert statistics["selected_over_scope_ratio"] == 0.0
     assert statistics["selected_over_model_ratio"] == 0.0
-    assert statistics["effective_delta_nonzero_count"] > 0
+    assert statistics["effective_delta_nonzero_count"] == 0
 
     for name in initial:
         for tensor_map in (
@@ -878,10 +1013,16 @@ def _check_lifecycle_and_bn():
 
 
 def _check_identity_and_planner():
-    base_path = osp.join(PROJECT_DIR, "configs", "shot_otta.yaml")
+    base_path = osp.join(PROJECT_DIR, "configs", "otta_fc_lbi_protocol_20260817_v1.yaml")
     base = load_yaml(base_path)
     base["variant"] = "module_lbi"
     base["requested_budget"] = 0.001
+    base["lbi"] = {
+        "alpha": 0.1, "kappa": 1.0, "nu": 1.0, "omega": 0.1,
+        "stage1_max_steps": 3000, "budget_tolerance": 0.0001,
+        "stage2_lr": 0.01, "stage2_steps": 1,
+        "delta_nonzero_tolerance": 1.0e-12, "support_threshold": 1.0e-4,
+    }
     effective = resolve_effective_config(base, WORKSPACE_ROOT)
     identity = build_experiment_identity(effective)
     changes = {
@@ -894,6 +1035,7 @@ def _check_identity_and_planner():
         "stage2_lr": 0.02,
         "stage2_steps": 2,
         "delta_nonzero_tolerance": 1.0e-10,
+        "support_threshold": 0.2,
     }
     for field, value in changes.items():
         changed = copy.deepcopy(effective)
@@ -908,7 +1050,7 @@ def _check_identity_and_planner():
         "method": "shot",
         "task": "otta",
         "datasets": {"office": {"transfers": [[0, 1]]}},
-        "seeds": [2020],
+        "seeds": [2026],
         "variants": {
             "module_lbi": {
                 "budgets": [0.001],
@@ -941,6 +1083,7 @@ def _check_identity_and_planner():
         ("stage2_lr", 0.0),
         ("stage2_steps", 0),
         ("delta_nonzero_tolerance", -1.0),
+        ("support_threshold", -1.0),
     ):
         invalid_matrix = copy.deepcopy(matrix)
         invalid_matrix["variants"]["module_lbi"]["lbi"][
@@ -985,10 +1128,16 @@ def _check_artifact_integration():
         def forward(self, values):
             return self.classifier(values)
 
-    base_path = osp.join(PROJECT_DIR, "configs", "shot_otta.yaml")
+    base_path = osp.join(PROJECT_DIR, "configs", "otta_fc_lbi_protocol_20260817_v1.yaml")
     config = load_yaml(base_path)
     config["variant"] = "module_lbi"
     config["requested_budget"] = 0.0
+    config["lbi"] = {
+        "alpha": 0.1, "kappa": 1.0, "nu": 1.0, "omega": 0.1,
+        "stage1_max_steps": 3000, "budget_tolerance": 0.0001,
+        "stage2_lr": 0.01, "stage2_steps": 1,
+        "delta_nonzero_tolerance": 1.0e-12, "support_threshold": 1.0e-4,
+    }
     config["data"]["workers"] = 0
     config["data"]["batch_size"] = 4
     config["lbi"]["stage1_max_steps"] = 2
@@ -1056,7 +1205,7 @@ def _check_artifact_integration():
                 artifact["lbi_state_lifecycle"]
                 == "reset_every_online_step"
             )
-            assert artifact["lbi_initialization"] == "dense"
+            assert artifact["lbi_initialization"] == "masked_delta"
             assert artifact["stage3_mode"] == "accumulation"
             assert artifact["stage1_branch_enabled"] is False
         online_metric = next(
@@ -1156,13 +1305,16 @@ def main():
     _check_one_step_math()
     _check_candidate_scope()
     _check_budget_and_rollback()
+    _check_support_threshold_and_rollback_bookkeeping()
     _check_stage2_and_stage3()
-    _check_old_parity()
-    _check_zero_budget_old_parity()
+    _check_stage2_fixed_learning_rate()
+    _check_masked_initialization_and_value_freezing()
+    _check_corrected_reference_parity()
+    _check_zero_budget_corrected_reference_parity()
     _check_lifecycle_and_bn()
     _check_identity_and_planner()
     _check_artifact_integration()
-    print("iclr2027 module_lbi math/parity smoke test passed")
+    print("iclr2027 module_lbi corrected-math smoke test passed")
     return 0
 
 

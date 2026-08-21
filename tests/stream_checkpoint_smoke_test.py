@@ -19,10 +19,12 @@ from shot_otta.trainer import (  # noqa: E402
     _load_stream_checkpoint,
     _save_stream_checkpoint,
 )
+from experiment_identity import IMPLEMENTATION_REVISION  # noqa: E402
 
 
 def main():
     config = {
+        "implementation_revision": IMPLEMENTATION_REVISION,
         "experiment_key": "checkpoint-smoke-key",
         "experiment_config_sha256": "a" * 64,
     }

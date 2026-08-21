@@ -28,6 +28,7 @@ from core.lbi import (  # noqa: E402
 
 COLUMNS = [
     "status",
+    "implementation_revision",
     "experiment_key",
     "experiment_config_sha256",
     "method",
@@ -44,7 +45,11 @@ COLUMNS = [
     "candidate_scope",
     "candidate_scope_type",
     "requested_budget",
+    "max_support_count",
     "target_support_count",
+    "exact_budget_reached_all_steps",
+    "strict_budget_boundary_all_steps",
+    "exact_budget_hit_count",
     "budget_reached_all_steps",
     "budget_hit_count",
     "budget_hit_rate",
@@ -133,12 +138,47 @@ COLUMNS = [
     "PU-Acc",
     "FO-Acc",
     "runtime",
+    "efficiency_protocol_revision",
+    "online_batch_runtime_mean_sec",
+    "online_batch_runtime_std_sec",
+    "online_batch_runtime_median_sec",
+    "online_batch_runtime_p95_sec",
+    "online_compute_runtime_sec",
+    "online_batch_runtime_mask_std_sec",
+    "online_compute_runtime_mask_std_sec",
+    "random_total_online_compute_runtime_sec",
+    "adapt_batch_runtime_mean_sec",
+    "adapt_batch_runtime_std_sec",
+    "adapt_batch_runtime_median_sec",
+    "adapt_batch_runtime_p95_sec",
+    "adapt_runtime_total_sec",
+    "pu_batch_runtime_mean_sec",
+    "pu_batch_runtime_std_sec",
+    "pu_batch_runtime_median_sec",
+    "pu_batch_runtime_p95_sec",
+    "pu_runtime_total_sec",
+    "gpu_peak_allocated_mean_mb",
+    "gpu_peak_allocated_max_mb",
+    "gpu_peak_reserved_mean_mb",
+    "gpu_peak_reserved_max_mb",
+    "fo_eval_runtime_sec",
+    "wall_runtime_sec",
+    "peak_gpu_memory_allocated_mb",
+    "peak_gpu_memory_reserved_mb",
+    "gpu_device_index",
+    "torch_version",
+    "cuda_version",
+    "runtime_resume_used",
+    "runtime_segment_count",
+    "gpu_name",
+    "runtime_comparable",
     "started_at_utc",
     "completed_at_utc",
     "run_id",
 ]
 
 SEED_GROUP_FIELDS = [
+    "implementation_revision",
     "method",
     "task",
     "dataset",
@@ -157,6 +197,7 @@ SEED_GROUP_FIELDS = [
     "delta_nonzero_tolerance",
 ]
 MACRO_GROUP_FIELDS = [
+    "implementation_revision",
     "method",
     "task",
     "dataset",
@@ -172,15 +213,102 @@ MACRO_GROUP_FIELDS = [
     "stage2_steps_requested",
     "delta_nonzero_tolerance",
 ]
-AGGREGATED_METRICS = ("PU-Acc", "FO-Acc", "runtime")
+AGGREGATED_METRICS = (
+    "PU-Acc",
+    "FO-Acc",
+    "runtime",
+    "online_batch_runtime_mean_sec",
+    "online_batch_runtime_std_sec",
+    "online_batch_runtime_median_sec",
+    "online_batch_runtime_p95_sec",
+    "online_compute_runtime_sec",
+    "online_batch_runtime_mask_std_sec",
+    "online_compute_runtime_mask_std_sec",
+    "random_total_online_compute_runtime_sec",
+    "adapt_batch_runtime_mean_sec",
+    "adapt_batch_runtime_std_sec",
+    "adapt_batch_runtime_median_sec",
+    "adapt_batch_runtime_p95_sec",
+    "adapt_runtime_total_sec",
+    "pu_batch_runtime_mean_sec",
+    "pu_batch_runtime_std_sec",
+    "pu_batch_runtime_median_sec",
+    "pu_batch_runtime_p95_sec",
+    "pu_runtime_total_sec",
+    "gpu_peak_allocated_mean_mb",
+    "gpu_peak_allocated_max_mb",
+    "gpu_peak_reserved_mean_mb",
+    "gpu_peak_reserved_max_mb",
+    "fo_eval_runtime_sec",
+    "wall_runtime_sec",
+    "peak_gpu_memory_allocated_mb",
+    "peak_gpu_memory_reserved_mb",
+)
+
+
+def _aggregate_runtime_metadata(group_rows):
+    comparable_values = [
+        row.get("runtime_comparable") is True for row in group_rows
+    ]
+    gpu_names = sorted(
+        {row.get("gpu_name") for row in group_rows if row.get("gpu_name")}
+    )
+    protocols = sorted(
+        {
+            row.get("efficiency_protocol_revision")
+            for row in group_rows
+            if row.get("efficiency_protocol_revision")
+        }
+    )
+    torch_versions = sorted(
+        {row.get("torch_version") for row in group_rows if row.get("torch_version")}
+    )
+    cuda_versions = sorted(
+        {row.get("cuda_version") for row in group_rows if row.get("cuda_version")}
+    )
+    return {
+        "runtime_comparable": bool(group_rows) and all(comparable_values),
+        "gpu_name": (
+            gpu_names[0]
+            if len(gpu_names) == 1
+            else ("mixed" if gpu_names else None)
+        ),
+        "efficiency_protocol_revision": (
+            protocols[0]
+            if len(protocols) == 1
+            else ("mixed" if protocols else None)
+        ),
+        "torch_version": (
+            torch_versions[0]
+            if len(torch_versions) == 1
+            else ("mixed" if torch_versions else None)
+        ),
+        "cuda_version": (
+            cuda_versions[0]
+            if len(cuda_versions) == 1
+            else ("mixed" if cuda_versions else None)
+        ),
+        "runtime_resume_used": any(
+            row.get("runtime_resume_used") is True for row in group_rows
+        ),
+        "runtime_segment_count": max(
+            [int(row.get("runtime_segment_count", 1)) for row in group_rows]
+            or [1]
+        ),
+    }
 
 LBI_BUDGET_DIAGNOSTIC_COLUMNS = [
+    "implementation_revision",
     "dataset",
     "source",
     "target",
     "seed",
     "requested_budget",
+    "max_support_count",
     "target_support_count",
+    "exact_budget_reached_all_steps",
+    "strict_budget_boundary_all_steps",
+    "exact_budget_hit_count",
     "alpha",
     "kappa",
     "nu",
@@ -203,6 +331,28 @@ LBI_BUDGET_DIAGNOSTIC_COLUMNS = [
     "stage1_steps_completed_mean",
     "FO-Acc",
     "runtime",
+    "efficiency_protocol_revision",
+    "online_batch_runtime_mean_sec",
+    "online_batch_runtime_std_sec",
+    "online_batch_runtime_median_sec",
+    "online_batch_runtime_p95_sec",
+    "online_compute_runtime_sec",
+    "adapt_batch_runtime_mean_sec",
+    "adapt_batch_runtime_std_sec",
+    "adapt_runtime_total_sec",
+    "pu_batch_runtime_mean_sec",
+    "pu_batch_runtime_std_sec",
+    "pu_runtime_total_sec",
+    "gpu_peak_allocated_mean_mb",
+    "gpu_peak_allocated_max_mb",
+    "gpu_peak_reserved_mean_mb",
+    "gpu_peak_reserved_max_mb",
+    "fo_eval_runtime_sec",
+    "wall_runtime_sec",
+    "peak_gpu_memory_allocated_mb",
+    "peak_gpu_memory_reserved_mb",
+    "gpu_name",
+    "runtime_comparable",
     "budget_diagnostics_available",
     "budget_diagnostics_source",
     "budget_diagnostics_unavailable_reason",
@@ -530,6 +680,7 @@ def aggregate_across_seeds(rows, plan=None):
             )
             for statistic, value in stats.items():
                 output[f"{metric}_{statistic}"] = value
+        output.update(_aggregate_runtime_metadata(group_rows))
         output.update(_aggregate_lbi_budget_diagnostics(group_rows))
         aggregated.append(output)
     aggregated.sort(
@@ -745,6 +896,7 @@ def aggregate_dataset_macro(
                 if transfer_means
                 else None
             )
+        output.update(_aggregate_runtime_metadata(transfer_rows))
         if output.get("variant") == "module_lbi":
             if key in completed_rows_by_key:
                 output.update(

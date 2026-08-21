@@ -6,21 +6,30 @@ import math
 MAX_STEPS_REASON_ALIASES = {"max_steps", "max_steps_reached"}
 STANDARD_STOP_REASONS = (
     "branch_disabled",
+    "budget_reached",
+    "strict_budget_rollback",
     "rollback_feasible",
     "cross_no_feasible",
     "max_steps",
 )
 
 STEP_BUDGET_DIAGNOSTIC_FIELDS = (
+    "max_support_count",
     "target_support_count",
     "support_gap_count",
+    "exact_budget_reached",
     "budget_reached",
+    "strict_budget_boundary_stop",
     "max_steps_hit",
     "valid_lbi_step",
 )
 
 RUN_BUDGET_DIAGNOSTIC_FIELDS = (
+    "max_support_count",
     "target_support_count",
+    "exact_budget_hit_count",
+    "exact_budget_reached_all_steps",
+    "strict_budget_boundary_all_steps",
     "budget_hit_count",
     "budget_hit_rate",
     "budget_reached_all_steps",
@@ -49,13 +58,20 @@ RUN_BUDGET_DIAGNOSTIC_FIELDS = (
 )
 
 
-def target_support_count(requested_budget, candidate_scope_param_count):
-    """Convert a requested ratio to the strict minimum integer support."""
-    return int(
-        math.ceil(
-            float(requested_budget) * int(candidate_scope_param_count)
-        )
+def max_support_count(requested_budget, candidate_param_count):
+    """Return the strict global integer support upper bound.
+
+    This is the single source of truth for every refined sparse budget:
+    ``floor(requested_budget * candidate_param_count)``.
+    """
+    return math.floor(
+        float(requested_budget) * int(candidate_param_count)
     )
+
+
+def target_support_count(requested_budget, candidate_scope_param_count):
+    """Compatibility alias for the strict maximum legal support count."""
+    return max_support_count(requested_budget, candidate_scope_param_count)
 
 
 def _canonical_stop_reason(reason):
@@ -71,21 +87,51 @@ def compute_lbi_step_budget_diagnostics(
     stage1_support_count,
     stage1_stop_reason,
 ):
-    target_count = target_support_count(
+    target_count = max_support_count(
         requested_budget, candidate_scope_param_count
     )
     support_count = int(stage1_support_count)
     gap_count = support_count - target_count
-    budget_reached = support_count >= target_count
-    max_steps_hit = (
-        str(stage1_stop_reason) in MAX_STEPS_REASON_ALIASES
+    stop_reason = str(stage1_stop_reason)
+    exact_budget_reached = (
+        (
+            stop_reason == "budget_reached"
+            and support_count == target_count
+        )
+        or (stop_reason == "branch_disabled" and target_count == 0)
+    )
+    max_steps_hit = stop_reason in MAX_STEPS_REASON_ALIASES
+    strict_budget_boundary_stop = (
+        not max_steps_hit
+        and support_count <= target_count
+        and (
+            (
+                stop_reason == "budget_reached"
+                and support_count == target_count
+            )
+            or (
+                stop_reason == "strict_budget_rollback"
+                and support_count <= target_count
+            )
+            or (
+                stop_reason == "rollback_feasible"
+                and support_count == target_count
+            )
+            or (stop_reason == "branch_disabled" and target_count == 0)
+        )
     )
     return {
+        "max_support_count": target_count,
         "target_support_count": target_count,
         "support_gap_count": gap_count,
-        "budget_reached": budget_reached,
+        "exact_budget_reached": exact_budget_reached,
+        # Keep the field name for downstream compatibility.  It now means
+        # exact integer equality, never a floating-point ratio comparison or
+        # an over-budget state.
+        "budget_reached": exact_budget_reached,
+        "strict_budget_boundary_stop": strict_budget_boundary_stop,
         "max_steps_hit": max_steps_hit,
-        "valid_lbi_step": budget_reached and not max_steps_hit,
+        "valid_lbi_step": strict_budget_boundary_stop,
     }
 
 
@@ -175,7 +221,7 @@ def compute_lbi_run_budget_diagnostics(step_records):
         )
 
     online_steps = len(annotated)
-    budget_hit_count = sum(
+    exact_budget_hit_count = sum(
         int(step["budget_reached"]) for step in annotated
     )
     valid_step_count = sum(
@@ -200,16 +246,32 @@ def compute_lbi_run_budget_diagnostics(step_records):
             stop_reason_counts.get(reason, 0) + 1
         )
 
-    budget_reached_all_steps = budget_hit_count == online_steps
+    exact_budget_reached_all_steps = (
+        exact_budget_hit_count == online_steps
+    )
+    strict_budget_boundary_all_steps = all(
+        step["strict_budget_boundary_stop"] for step in annotated
+    )
+    # This legacy aggregate is used by search/finalize tools.  Preserve its
+    # role as an all-steps budget-constrained termination flag, including a
+    # legal strict-budget rollback whose final support is below K.
+    budget_reached_all_steps = all(
+        step["budget_reached"] or step["strict_budget_boundary_stop"]
+        for step in annotated
+    )
     diagnostics = {
         "budget_diagnostics_available": True,
         "budget_diagnostics_source": None,
         "budget_diagnostics_unavailable_reason": None,
+        "max_support_count": annotated[0]["max_support_count"],
         "target_support_count": annotated[0][
             "target_support_count"
         ],
-        "budget_hit_count": budget_hit_count,
-        "budget_hit_rate": budget_hit_count / online_steps,
+        "exact_budget_hit_count": exact_budget_hit_count,
+        "exact_budget_reached_all_steps": exact_budget_reached_all_steps,
+        "strict_budget_boundary_all_steps": strict_budget_boundary_all_steps,
+        "budget_hit_count": exact_budget_hit_count,
+        "budget_hit_rate": exact_budget_hit_count / online_steps,
         "budget_reached_all_steps": budget_reached_all_steps,
         "valid_lbi_step_count": valid_step_count,
         "valid_lbi_step_rate": valid_step_count / online_steps,

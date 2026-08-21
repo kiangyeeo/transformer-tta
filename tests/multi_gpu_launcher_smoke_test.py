@@ -17,6 +17,7 @@ def main():
    q=runs/key; q.mkdir(parents=True); (q/'summary.json').write_text(json.dumps({'status':'completed','experiment_key':key,'experiment_config_sha256':cmd[2]})); Path(out).write_text('ok'); Path(err).write_text('')
    with lock: active[gpu]-=1
    return 0
+  for x in xs: x['expected_output_root']=str(runs/x['experiment_key'])
   plan={'experiments':xs}; r=execute(plan,runs,root/'logs',['0','1','2','3','4','5','6','7'],root,process_executor=fake,workers_per_gpu=2)
   assert len(seen)==16 and set(g for _,g in seen)=={'0','1','2','3','4','5','6','7'} and all(v<=2 for v in maximum.values())
   assert {x['assigned_gpu'] for x in r['records'] if x['status']=='completed'}=={'0','1','2','3','4','5','6','7'}

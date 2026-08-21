@@ -39,7 +39,7 @@ def build_random_office_plan(matrix_path, base_config_path):
         if (
             experiment["dataset"] == "office"
             and experiment["variant"] == "module_random"
-            and experiment["seed"] == 2020
+            and experiment["seed"] == 2026
             and (experiment["source"], experiment["target"]) in TRANSFERS
             and float(experiment["requested_budget"]) in BUDGETS
         ):
@@ -57,8 +57,8 @@ def build_random_office_plan(matrix_path, base_config_path):
         )
     if {item["num_random_masks"] for item in selected} != {3}:
         raise RuntimeError("Formal plan does not specify exactly 3 masks")
-    if {item["seed"] for item in selected} != {2020}:
-        raise RuntimeError("Formal plan seed filter is not exactly 2020")
+    if {item["seed"] for item in selected} != {2026}:
+        raise RuntimeError("Formal plan seed filter is not exactly 2026")
     if {item["variant"] for item in selected} != {"module_random"}:
         raise RuntimeError("Formal plan contains a non-random variant")
     plan = copy.deepcopy(formal_plan)
@@ -71,7 +71,7 @@ def build_random_office_plan(matrix_path, base_config_path):
                 "base_config_path": osp.abspath(base_config_path),
                 "dataset": "office",
                 "variant": "module_random",
-                "seed": 2020,
+                "seed": 2026,
                 "transfers": sorted(TRANSFERS),
                 "budgets": sorted(BUDGETS),
                 "num_random_masks": 3,

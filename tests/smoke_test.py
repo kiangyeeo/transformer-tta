@@ -23,12 +23,17 @@ from tools.summarize_runs import (  # noqa: E402
 )
 from shot_otta.trainer import (  # noqa: E402
     _build_dynamic_saliency_masks,
+    _build_static_random_masks,
     _build_static_magnitude_masks,
     _compute_mask_selection_stats,
     _compute_metrics,
+    _compute_dataset_metrics,
     _compute_saliency_score,
     _configure_variant,
     _masked_optimizer_step,
+    _post_update_forward,
+    _restore_bn_buffers,
+    _snapshot_bn_buffers as _trainer_snapshot_bn_buffers,
     _summarize_dynamic_selection_stats,
 )
 
@@ -53,7 +58,7 @@ class TinyBottleneck(nn.Module):
         return self.bn(self.bottleneck(inputs))
 
 
-def _variant_config(variant, requested_budget=0.1, selection_seed=2020):
+def _variant_config(variant, requested_budget=0.1, selection_seed=2026):
     return {
         "variant": variant,
         "requested_budget": requested_budget,
@@ -73,6 +78,7 @@ def _variant_config(variant, requested_budget=0.1, selection_seed=2020):
             "stage2_lr": 0.01,
             "stage2_steps": 1,
             "delta_nonzero_tolerance": 1.0e-12,
+            "support_threshold": 1.0e-4,
         },
     }
 
@@ -150,6 +156,25 @@ def _check_variant_counts():
     net_c(net_b(net_f(inputs)))
     full_after = _snapshot_bn_buffers(net_f, net_b, net_c)
     assert not _bn_buffers_equal(full_before, full_after)
+
+    # Full SHOT keeps train-mode BN adaptation, but the extra PU measurement
+    # forward must not leave another update in persistent BN buffers.
+    pu_before = _snapshot_bn_buffers(net_f, net_b, net_c)
+    trainer_pu_before = _trainer_snapshot_bn_buffers(net_f, net_b, net_c)
+    modes_before = (net_f.training, net_b.training, net_c.training)
+    with torch.no_grad():
+        net_c(net_b(net_f(inputs)))
+    pu_polluted = _snapshot_bn_buffers(net_f, net_b, net_c)
+    assert not _bn_buffers_equal(pu_before, pu_polluted)
+    _restore_bn_buffers(trainer_pu_before)
+    assert _bn_buffers_equal(pu_before, _snapshot_bn_buffers(net_f, net_b, net_c))
+    pu_outputs = _post_update_forward(
+        inputs, net_f, net_b, net_c, preserve_bn_state=True
+    )
+    pu_after = _snapshot_bn_buffers(net_f, net_b, net_c)
+    assert pu_outputs.shape == (4, 2)
+    assert _bn_buffers_equal(pu_before, pu_after)
+    assert modes_before == (net_f.training, net_b.training, net_c.training)
 
     groups, stats, masks = _configure_variant(
         _variant_config("module_dense"), net_f, net_b, net_c
@@ -411,7 +436,7 @@ def _check_module_random(
 
     for budget, expected_selected in (
         (0.0, 0),
-        (1.0e-12, len(masks_a)),
+        (1.0e-12, 0),
         (1.0, candidate_count),
     ):
         _, edge_stats, edge_masks = _configure_variant(
@@ -440,6 +465,59 @@ def _numpy_rng_states_equal(left, right):
         and np.array_equal(left[1], right[1])
         and left[2:] == right[2:]
     )
+
+
+def _check_global_budget_selection_and_momentum():
+    weight = nn.Parameter(torch.tensor([9.0, 1.0, 2.0, 3.0]))
+    bias = nn.Parameter(torch.tensor([8.0, 7.0]))
+    named = [("weight", weight), ("bias", bias)]
+
+    random_masks = _build_static_random_masks(
+        named, requested_budget=0.25, seed=7
+    )
+    assert sum(int(mask.count_nonzero()) for mask in random_masks.values()) == 1
+    zero_masks = _build_static_random_masks(
+        named, requested_budget=1.0e-12, seed=7
+    )
+    assert all(torch.count_nonzero(mask) == 0 for mask in zero_masks.values())
+
+    magnitude_masks = _build_static_magnitude_masks(
+        named, requested_budget=0.25
+    )
+    assert torch.equal(magnitude_masks["weight"], torch.tensor([True, False, False, False]))
+    assert torch.count_nonzero(magnitude_masks["bias"]) == 0
+
+    weight.grad = torch.tensor([1.0, 1.0, 1.0, 1.0])
+    bias.grad = torch.tensor([0.5, 0.5])
+    saliency_masks = _build_dynamic_saliency_masks(
+        named, requested_budget=0.25
+    )
+    assert torch.equal(saliency_masks["weight"], torch.tensor([True, False, False, False]))
+    assert torch.count_nonzero(saliency_masks["bias"]) == 0
+
+    parameter = nn.Parameter(torch.tensor([1.0, 1.0]))
+    optimizer = torch.optim.SGD(
+        [parameter], lr=0.1, momentum=0.9, nesterov=True
+    )
+    lookup = {"parameter": parameter}
+
+    def step(mask, gradient):
+        optimizer.zero_grad()
+        parameter.grad = gradient.clone()
+        before = parameter.detach().clone()
+        _masked_optimizer_step(optimizer, lookup, {"parameter": mask})
+        buffer = optimizer.state[parameter]["momentum_buffer"].detach().clone()
+        assert torch.equal(parameter.detach()[~mask], before[~mask])
+        assert torch.count_nonzero(buffer[~mask]) == 0
+        return before, buffer
+
+    _, buffer1 = step(torch.tensor([True, False]), torch.tensor([1.0, 1.0]))
+    _, buffer2 = step(torch.tensor([True, False]), torch.tensor([1.0, 1.0]))
+    assert buffer2[0].abs() > buffer1[0].abs()
+    _, buffer3 = step(torch.tensor([False, True]), torch.tensor([2.0, 1.0]))
+    assert buffer3[0] == 0
+    _, buffer4 = step(torch.tensor([True, False]), torch.tensor([3.0, 1.0]))
+    assert buffer4[0] == 3.0
 
 
 def _check_module_magnitude(
@@ -571,7 +649,7 @@ def _check_module_magnitude(
 
     for budget, edge_expected in (
         (0.0, 0),
-        (1.0e-12, len(masks)),
+        (1.0e-12, 0),
         (1.0, candidate_count),
     ):
         _, edge_stats, edge_masks = _configure_variant(
@@ -732,7 +810,7 @@ def _check_module_saliency(
 
     for budget, expected_selected in (
         (0.0, 0),
-        (1.0e-12, len(named_parameters)),
+        (1.0e-12, 0),
         (1.0, sum(parameter.numel() for _, parameter in named_parameters)),
     ):
         edge_masks = _build_dynamic_saliency_masks(
@@ -947,6 +1025,7 @@ def _bn_buffers_equal(left, right):
 
 def main():
     _check_variant_counts()
+    _check_global_budget_selection_and_momentum()
     precise_value = 0.12345678901234568
     metric, per_class = _compute_metrics(
         np.array([0, 0, 1, 1]),
@@ -954,6 +1033,27 @@ def main():
     )
     assert metric == 75.0
     assert per_class == [50.0, 100.0]
+
+    # Office's imbalanced main metric is sample-level accuracy, while the
+    # existing per-class array remains available as a diagnostic.
+    office_metrics = _compute_dataset_metrics(
+        np.array([0, 0, 0, 0, 1]),
+        np.array([0, 1, 1, 1, 1]),
+        "office",
+        "PU",
+    )
+    assert office_metrics["PU-Acc"] == 40.0
+    assert office_metrics["PU-Acc-per-class"] == [25.0, 100.0]
+    assert office_metrics["PU-Acc"] != sum(
+        office_metrics["PU-Acc-per-class"]
+    ) / 2.0
+    office_fo_metrics = _compute_dataset_metrics(
+        np.array([0, 0, 0, 0, 1]),
+        np.array([0, 1, 1, 1, 1]),
+        "office",
+        "FO",
+    )
+    assert office_fo_metrics["FO-Acc"] == 40.0
 
     with tempfile.TemporaryDirectory(prefix="iclr2027_smoke_") as temp_dir:
         run_dir = osp.join(temp_dir, "runs", "run-a")

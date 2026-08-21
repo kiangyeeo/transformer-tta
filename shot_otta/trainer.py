@@ -18,7 +18,7 @@ from tqdm import tqdm
 from core.lbi import (
     SplitLBIEngine,
     compute_lbi_run_budget_diagnostics,
-    target_support_count,
+    max_support_count,
 )
 from .artifacts import (
     SCHEMA_VERSION,
@@ -31,6 +31,12 @@ from .artifacts import (
 from .data import build_loaders
 from .losses import shot_adaptation_loss
 from .models import load_source_models
+from .efficiency import (
+    BATCH_EFFICIENCY_FIELDS,
+    EFFICIENCY_PROTOCOL_REVISION,
+    aggregate_batch_efficiency,
+    aggregate_random_efficiency,
+)
 
 
 def setup_reproducibility(seed):
@@ -44,16 +50,221 @@ def setup_reproducibility(seed):
     torch.backends.cudnn.benchmark = False
 
 
-MODULE_CANDIDATE_NAMES = {
+MODULE_CANDIDATE_ORDER = (
     "netB.bottleneck.weight",
     "netB.bottleneck.bias",
-}
+)
+MODULE_CANDIDATE_NAMES = set(MODULE_CANDIDATE_ORDER)
 
 STREAM_CHECKPOINT_SCHEMA_VERSION = 1
 
 
 class StreamInterrupted(RuntimeError):
     """Raised after a checkpoint has been safely written for a signal."""
+
+
+class RuntimeInstrumentation:
+    """Measure formal per-batch online/FO compute without touching science."""
+
+    def __init__(self, device, runtime_comparable=False):
+        self.device = device
+        self.online_compute_runtime_sec = 0.0
+        self.fo_eval_runtime_sec = 0.0
+        self.runtime_comparable = bool(runtime_comparable)
+        self.batch_efficiency_records = []
+        self.runtime_resume_used = False
+        self.runtime_segment_count = 1
+        self._current_batch = None
+
+    def _synchronize(self):
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    def reset_peak_memory(self):
+        if self.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(self.device)
+
+    def begin_batch(self, batch_index, batch_size):
+        """Start a memory interval after input transfer, before adaptation."""
+        self.reset_peak_memory()
+        self._current_batch = {
+            "batch_index": int(batch_index),
+            "batch_size": int(batch_size),
+            "adapt_runtime_sec": 0.0,
+            "pu_runtime_sec": 0.0,
+            "online_runtime_sec": 0.0,
+            "lbi_stage1_runtime_sec": None,
+            "lbi_stage2_runtime_sec": None,
+        }
+
+    def _start_timer(self):
+        self._synchronize()
+        return time.perf_counter()
+
+    def _stop_timer(self, started_at):
+        self._synchronize()
+        return float(time.perf_counter() - started_at)
+
+    def start_adaptation(self):
+        return self._start_timer()
+
+    def finish_adaptation(self, started_at):
+        elapsed = self._stop_timer(started_at)
+        if self._current_batch is not None:
+            self._current_batch["adapt_runtime_sec"] = elapsed
+        else:
+            self.online_compute_runtime_sec += elapsed
+        return elapsed
+
+    def start_pu(self):
+        return self._start_timer()
+
+    def finish_pu(self, started_at):
+        elapsed = self._stop_timer(started_at)
+        if self._current_batch is not None:
+            self._current_batch["pu_runtime_sec"] = elapsed
+        return elapsed
+
+    def start(self, name):
+        """Generic synchronized timer hook used by the LBI engine."""
+        del name
+        return self._start_timer()
+
+    def stop(self, name, started_at):
+        elapsed = self._stop_timer(started_at)
+        if self._current_batch is not None:
+            self._current_batch[f"{name}_runtime_sec"] = elapsed
+        return elapsed
+
+    def finish_batch(self):
+        if self._current_batch is None:
+            raise RuntimeError("finish_batch called without begin_batch")
+        record = dict(self._current_batch)
+        record["online_runtime_sec"] = float(
+            record["adapt_runtime_sec"] + record["pu_runtime_sec"]
+        )
+        if self.device.type == "cuda":
+            allocated = int(torch.cuda.max_memory_allocated(self.device))
+            reserved = int(torch.cuda.max_memory_reserved(self.device))
+            record.update(
+                {
+                    "peak_gpu_memory_allocated_bytes": allocated,
+                    "peak_gpu_memory_reserved_bytes": reserved,
+                    "peak_gpu_memory_allocated_mb": float(
+                        allocated / (1024**2)
+                    ),
+                    "peak_gpu_memory_reserved_mb": float(
+                        reserved / (1024**2)
+                    ),
+                }
+            )
+        else:
+            record.update(
+                {
+                    "peak_gpu_memory_allocated_bytes": None,
+                    "peak_gpu_memory_reserved_bytes": None,
+                    "peak_gpu_memory_allocated_mb": None,
+                    "peak_gpu_memory_reserved_mb": None,
+                }
+            )
+        self.batch_efficiency_records.append(record)
+        self.online_compute_runtime_sec = float(
+            sum(
+                item["online_runtime_sec"]
+                for item in self.batch_efficiency_records
+            )
+        )
+        self._current_batch = None
+        return record
+
+    def restore_batch_efficiency(self, records):
+        self.batch_efficiency_records = [dict(record) for record in records]
+        self.online_compute_runtime_sec = float(
+            sum(
+                float(record.get("online_runtime_sec", 0.0))
+                for record in self.batch_efficiency_records
+            )
+        )
+
+    def start_online_step(self):
+        return self._start_timer()
+
+    def finish_online_step(self, started_at):
+        elapsed = self._stop_timer(started_at)
+        self.online_compute_runtime_sec += elapsed
+        return elapsed
+
+    def measure_fo(self, function):
+        self._synchronize()
+        started_at = time.perf_counter()
+        result = function()
+        self._synchronize()
+        self.fo_eval_runtime_sec += time.perf_counter() - started_at
+        return result
+
+    def metadata(self):
+        batch_aggregate = aggregate_batch_efficiency(
+            self.batch_efficiency_records
+        )
+        metadata = {
+            "efficiency_protocol_revision": EFFICIENCY_PROTOCOL_REVISION,
+            "online_compute_runtime_sec": float(
+                batch_aggregate["online_compute_runtime_sec"]
+                if self.batch_efficiency_records
+                else self.online_compute_runtime_sec
+            ),
+            "fo_eval_runtime_sec": float(self.fo_eval_runtime_sec),
+            "runtime_comparable": self.runtime_comparable,
+            "runtime_resume_used": bool(self.runtime_resume_used),
+            "runtime_segment_count": int(self.runtime_segment_count),
+            "gpu_name": None,
+            "gpu_device_index": None,
+            "gpu_total_memory_bytes": None,
+            "peak_gpu_memory_allocated_bytes": None,
+            "peak_gpu_memory_reserved_bytes": None,
+            "peak_gpu_memory_allocated_mb": None,
+            "peak_gpu_memory_reserved_mb": None,
+            "torch_version": torch.__version__,
+            "cuda_version": torch.version.cuda,
+        }
+        metadata.update(batch_aggregate)
+        if not self.batch_efficiency_records:
+            metadata["online_compute_runtime_sec"] = float(
+                self.online_compute_runtime_sec
+            )
+        if self.device.type != "cuda":
+            return metadata
+        device_index = self.device.index
+        properties = torch.cuda.get_device_properties(self.device)
+        allocated = torch.cuda.max_memory_allocated(self.device)
+        reserved = torch.cuda.max_memory_reserved(self.device)
+        if self.batch_efficiency_records:
+            allocated = max(
+                int(record["peak_gpu_memory_allocated_bytes"])
+                for record in self.batch_efficiency_records
+                if record.get("peak_gpu_memory_allocated_bytes") is not None
+            )
+            reserved = max(
+                int(record["peak_gpu_memory_reserved_bytes"])
+                for record in self.batch_efficiency_records
+                if record.get("peak_gpu_memory_reserved_bytes") is not None
+            )
+        metadata.update(
+            {
+                "gpu_name": torch.cuda.get_device_name(self.device),
+                "gpu_device_index": int(
+                    torch.cuda.current_device()
+                    if device_index is None
+                    else device_index
+                ),
+                "gpu_total_memory_bytes": int(properties.total_memory),
+                "peak_gpu_memory_allocated_bytes": int(allocated),
+                "peak_gpu_memory_reserved_bytes": int(reserved),
+                "peak_gpu_memory_allocated_mb": float(allocated / (1024**2)),
+                "peak_gpu_memory_reserved_mb": float(reserved / (1024**2)),
+            }
+        )
+        return metadata
 
 
 def _stream_checkpoint_paths(output_dir):
@@ -116,12 +327,18 @@ def _save_stream_checkpoint(
     dynamic_selection_history,
     started_at_utc,
     runtime_seconds,
+    online_compute_runtime_sec=0.0,
+    wall_runtime_sec=None,
+    batch_efficiency_records=None,
+    runtime_resume_used=False,
+    runtime_segment_count=1,
 ):
     """Atomically checkpoint only completed online steps, never LBI mid-step."""
     paths = _stream_checkpoint_paths(output_dir)
     payload = {
         "schema_version": STREAM_CHECKPOINT_SCHEMA_VERSION,
         "run_id": run_id,
+        "implementation_revision": config["implementation_revision"],
         "experiment_key": config["experiment_key"],
         "experiment_config_sha256": config[
             "experiment_config_sha256"
@@ -130,6 +347,13 @@ def _save_stream_checkpoint(
         "loader_batches_processed": int(loader_batches_processed),
         "started_at_utc": started_at_utc,
         "runtime_seconds": float(runtime_seconds),
+        "online_compute_runtime_sec": float(online_compute_runtime_sec),
+        "wall_runtime_sec": float(
+            runtime_seconds if wall_runtime_sec is None else wall_runtime_sec
+        ),
+        "batch_efficiency_records": list(batch_efficiency_records or []),
+        "runtime_resume_used": bool(runtime_resume_used),
+        "runtime_segment_count": int(runtime_segment_count),
         "net_f": net_f.state_dict(),
         "net_b": net_b.state_dict(),
         "net_c": net_c.state_dict(),
@@ -148,12 +372,25 @@ def _save_stream_checkpoint(
             "schema_version": STREAM_CHECKPOINT_SCHEMA_VERSION,
             "status": "in_progress",
             "run_id": run_id,
+            "implementation_revision": config[
+                "implementation_revision"
+            ],
             "experiment_key": config["experiment_key"],
             "experiment_config_sha256": config[
                 "experiment_config_sha256"
             ],
             "iteration": int(iteration),
             "loader_batches_processed": int(loader_batches_processed),
+            "online_compute_runtime_sec": float(
+                online_compute_runtime_sec
+            ),
+            "wall_runtime_sec": float(
+                runtime_seconds if wall_runtime_sec is None else wall_runtime_sec
+            ),
+            "efficiency_protocol_revision": EFFICIENCY_PROTOCOL_REVISION,
+            "runtime_resume_used": bool(runtime_resume_used),
+            "runtime_segment_count": int(runtime_segment_count),
+            "efficiency_batch_count": len(batch_efficiency_records or []),
             "updated_at_utc": datetime.now(timezone.utc).isoformat(),
         },
     )
@@ -169,7 +406,11 @@ def _load_stream_checkpoint(resume_run_dir, config, net_f, net_b, net_c, optimiz
         )
     with open(paths["metadata"], "r", encoding="utf-8") as file_obj:
         metadata = json.load(file_obj)
-    for field in ("experiment_key", "experiment_config_sha256"):
+    for field in (
+        "implementation_revision",
+        "experiment_key",
+        "experiment_config_sha256",
+    ):
         if metadata.get(field) != config[field]:
             raise RuntimeError(
                 "resume checkpoint identity mismatch for "
@@ -181,7 +422,11 @@ def _load_stream_checkpoint(resume_run_dir, config, net_f, net_b, net_c, optimiz
     )
     if payload.get("schema_version") != STREAM_CHECKPOINT_SCHEMA_VERSION:
         raise RuntimeError("unsupported stream checkpoint schema")
-    for field in ("experiment_key", "experiment_config_sha256"):
+    for field in (
+        "implementation_revision",
+        "experiment_key",
+        "experiment_config_sha256",
+    ):
         if payload.get(field) != config[field]:
             raise RuntimeError(
                 f"stream checkpoint payload identity mismatch for {field}"
@@ -201,13 +446,29 @@ def _existing_artifact_paths(output_dir, summary_filename):
         "metrics": osp.join(output_dir, "metrics.jsonl"),
         "summary": osp.join(output_dir, summary_filename),
     }
-    missing = [name for name in ("config", "manifest", "metrics") if not osp.isfile(paths[name])]
+    missing = [
+        name
+        for name in ("config", "manifest", "metrics")
+        if not osp.isfile(paths[name])
+    ]
     if missing:
         raise RuntimeError(
             "resume run directory is missing artifacts: "
             f"{', '.join(missing)}"
         )
     return paths
+
+
+def _update_manifest_runtime(artifact_paths, runtime_metadata, wall_runtime):
+    """Add final runtime metadata after the measured run has completed."""
+    manifest_path = artifact_paths.get("manifest")
+    if not manifest_path or not osp.isfile(manifest_path):
+        return
+    with open(manifest_path, "r", encoding="utf-8") as file_obj:
+        manifest = json.load(file_obj)
+    manifest.update(runtime_metadata)
+    manifest["wall_runtime_sec"] = float(wall_runtime)
+    dump_json(manifest_path, manifest)
 
 
 def _write_incomplete_run_record(
@@ -223,6 +484,7 @@ def _write_incomplete_run_record(
         "schema_version": SCHEMA_VERSION,
         "status": "incomplete",
         "run_id": run_id,
+        "implementation_revision": config["implementation_revision"],
         "experiment_key": config["experiment_key"],
         "experiment_config_sha256": config[
             "experiment_config_sha256"
@@ -267,76 +529,86 @@ def _truncate_metrics_to_checkpoint(metrics_path, completed_iteration):
 
 
 def _collect_module_candidates(all_named_parameters):
-    candidate_parameters = [
-        (name, parameter)
-        for name, parameter in all_named_parameters
-        if name in MODULE_CANDIDATE_NAMES
-    ]
-    found_names = {name for name, _ in candidate_parameters}
+    parameter_lookup = dict(all_named_parameters)
+    found_names = set(parameter_lookup).intersection(MODULE_CANDIDATE_NAMES)
     if found_names != MODULE_CANDIDATE_NAMES:
         missing = sorted(MODULE_CANDIDATE_NAMES - found_names)
         raise RuntimeError(f"module parameters not found: {missing}")
-    return candidate_parameters
+    return [
+        (name, parameter_lookup[name])
+        for name in MODULE_CANDIDATE_ORDER
+    ]
 
 
-def _budget_to_num_keep(numel, requested_budget):
-    num_keep = int(numel * requested_budget)
-    if 0.0 < requested_budget < 1.0 and num_keep == 0 and numel > 0:
-        num_keep = 1
-    if requested_budget == 0.0:
-        return 0
-    if requested_budget == 1.0:
-        return numel
-    return num_keep
+def _candidate_offsets(named_parameters):
+    """Return deterministic flatten offsets for the global candidate pool."""
+    offsets = {}
+    total = 0
+    for name, parameter in named_parameters:
+        if name in offsets:
+            raise ValueError(f"duplicate candidate parameter name: {name}")
+        offsets[name] = (total, total + parameter.numel())
+        total += parameter.numel()
+    return offsets, total
 
 
-def _build_static_random_masks(named_parameters, requested_budget, seed):
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(int(seed))
+def _masks_from_global_indices(named_parameters, selected_indices):
+    offsets, total = _candidate_offsets(named_parameters)
+    selected = torch.zeros(total, dtype=torch.bool, device="cpu")
+    if selected_indices.numel():
+        selected[selected_indices.to(device="cpu", dtype=torch.long)] = True
     masks = {}
     for name, parameter in named_parameters:
-        numel = parameter.numel()
-        num_keep = _budget_to_num_keep(numel, requested_budget)
-
-        flat_mask = torch.zeros(numel, dtype=torch.bool, device="cpu")
-        if num_keep > 0:
-            selected_indices = torch.randperm(
-                numel, generator=generator, device="cpu"
-            )[:num_keep]
-            flat_mask[selected_indices] = True
-        masks[name] = flat_mask.reshape(parameter.shape).to(
+        start, end = offsets[name]
+        masks[name] = selected[start:end].reshape(parameter.shape).to(
             device=parameter.device
         )
     return masks
 
 
-def _build_stable_score_mask(scores, requested_budget, device):
-    numel = scores.numel()
-    num_keep = _budget_to_num_keep(numel, requested_budget)
-    flat_mask = torch.zeros(numel, dtype=torch.bool, device="cpu")
-    if num_keep == numel:
-        flat_mask.fill_(True)
-    elif num_keep > 0:
-        flat_scores = scores.detach().reshape(-1).to(device="cpu")
-        ranked_indices = torch.argsort(
-            flat_scores,
+def _global_score_mask(named_parameters, score_by_name, requested_budget):
+    """Select exactly K scores from the deterministic global FC pool."""
+    offsets, total = _candidate_offsets(named_parameters)
+    max_count = max_support_count(requested_budget, total)
+    if max_count == 0:
+        selected_indices = torch.empty(0, dtype=torch.long)
+    else:
+        global_scores = torch.cat(
+            [
+                score_by_name[name].detach().reshape(-1).to(device="cpu")
+                for name, _ in named_parameters
+            ]
+        )
+        selected_indices = torch.argsort(
+            global_scores,
             descending=True,
             stable=True,
-        )
-        flat_mask[ranked_indices[:num_keep]] = True
-    return flat_mask.reshape(scores.shape).to(device=device)
+        )[:max_count]
+    return _masks_from_global_indices(named_parameters, selected_indices)
+
+
+def _build_static_random_masks(named_parameters, requested_budget, seed):
+    named_parameters = list(named_parameters)
+    _, candidate_count = _candidate_offsets(named_parameters)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(seed))
+    max_count = max_support_count(requested_budget, candidate_count)
+    selected_indices = torch.randperm(
+        candidate_count, generator=generator, device="cpu"
+    )[:max_count]
+    return _masks_from_global_indices(named_parameters, selected_indices)
 
 
 def _build_static_magnitude_masks(named_parameters, requested_budget):
-    masks = {}
-    for name, parameter in named_parameters:
-        scores = parameter.detach().abs()
-        masks[name] = _build_stable_score_mask(
-            scores,
-            requested_budget=requested_budget,
-            device=parameter.device,
-        )
-    return masks
+    named_parameters = list(named_parameters)
+    return _global_score_mask(
+        named_parameters,
+        {
+            name: parameter.detach().abs()
+            for name, parameter in named_parameters
+        },
+        requested_budget,
+    )
 
 
 def _compute_saliency_score(name, parameter):
@@ -348,15 +620,15 @@ def _compute_saliency_score(name, parameter):
 
 
 def _build_dynamic_saliency_masks(named_parameters, requested_budget):
-    masks = {}
-    for name, parameter in named_parameters:
-        scores = _compute_saliency_score(name, parameter)
-        masks[name] = _build_stable_score_mask(
-            scores,
-            requested_budget=requested_budget,
-            device=parameter.device,
-        )
-    return masks
+    named_parameters = list(named_parameters)
+    return _global_score_mask(
+        named_parameters,
+        {
+            name: _compute_saliency_score(name, parameter)
+            for name, parameter in named_parameters
+        },
+        requested_budget,
+    )
 
 
 def _count_selected_mask_elements(masks):
@@ -452,6 +724,12 @@ def _masked_optimizer_step(optimizer, parameter_lookup, masks):
     with torch.no_grad():
         for name, mask in masks.items():
             parameter = parameter_lookup[name]
+            mask = mask.to(device=parameter.device, dtype=torch.bool)
+            momentum_buffer = optimizer.state.get(parameter, {}).get(
+                "momentum_buffer"
+            )
+            if momentum_buffer is not None:
+                momentum_buffer.mul_(mask)
             if parameter.grad is not None:
                 parameter.grad.mul_(
                     mask.to(
@@ -473,6 +751,11 @@ def _masked_optimizer_step(optimizer, parameter_lookup, masks):
                     pre_step_parameters[name],
                 )
             )
+            momentum_buffer = optimizer.state.get(parameter, {}).get(
+                "momentum_buffer"
+            )
+            if momentum_buffer is not None:
+                momentum_buffer.mul_(mask.to(device=parameter.device))
 
 
 def _configure_variant(config, net_f, net_b, net_c):
@@ -601,13 +884,7 @@ def _configure_variant(config, net_f, net_b, net_c):
                 "current_parameter_times_current_gradient"
             )
             saliency_score = "abs_parameter_times_gradient"
-            expected_selected_param_count_per_step = sum(
-                _budget_to_num_keep(
-                    parameter.numel(),
-                    requested_budget,
-                )
-                for _, parameter in candidate_parameters
-            )
+            expected_selected_param_count_per_step = None
         else:
             selection = "lbi"
             requested_budget = float(config["requested_budget"])
@@ -641,6 +918,13 @@ def _configure_variant(config, net_f, net_b, net_c):
     total_model_param_count = sum(
         parameter.numel() for _, parameter in all_named_parameters
     )
+    budget_support_count = (
+        max_support_count(requested_budget, candidate_scope_param_count)
+        if requested_budget is not None
+        else None
+    )
+    if variant == "module_saliency":
+        expected_selected_param_count_per_step = budget_support_count
     if selected_param_count is None:
         selected_over_scope_ratio = None
         selected_over_model_ratio = None
@@ -660,6 +944,12 @@ def _configure_variant(config, net_f, net_b, net_c):
         "candidate_scope": candidate_scope,
         "candidate_scope_type": candidate_scope_type,
         "requested_budget": requested_budget,
+        "max_support_count": budget_support_count,
+        "budget_semantics": (
+            "global_fc_floor_integer"
+            if candidate_scope_type == "fc_parameters"
+            else None
+        ),
         "ranking_source": ranking_source,
         "mask_refresh_policy": mask_refresh_policy,
         "saliency_score": saliency_score,
@@ -698,23 +988,20 @@ def _configure_variant(config, net_f, net_b, net_c):
                 "stage2_lr": float(lbi["stage2_lr"]),
                 "stage2_steps_requested": int(lbi["stage2_steps"]),
                 "stage2_optimizer": "sgd",
-                "lbi_support_threshold": 1.0e-4,
+                "lbi_support_threshold": float(
+                    lbi["support_threshold"]
+                ),
                 "stage2_momentum": 0.9,
                 "stage2_weight_decay": 1.0e-3,
                 "stage2_nesterov": True,
-                "stage2_lr_policy": "shot",
-                "stage2_lr_gamma": 10.0,
-                "stage2_lr_power": 0.75,
                 "delta_nonzero_tolerance": float(
                     lbi["delta_nonzero_tolerance"]
                 ),
                 "lbi_state_lifecycle": "reset_every_online_step",
-                "lbi_initialization": "dense",
+                "lbi_initialization": "masked_delta",
                 "stage3_mode": "accumulation",
                 "stage1_branch_enabled": requested_budget > 0.0,
-                "target_support_count": target_support_count(
-                    requested_budget, candidate_scope_param_count
-                ),
+                "target_support_count": budget_support_count,
                 "support_param_count": None,
                 "support_over_scope_ratio": None,
                 "support_over_model_ratio": None,
@@ -815,14 +1102,72 @@ def _compute_metrics(labels, predictions):
     return float(per_class.mean()), [float(value) for value in per_class]
 
 
+def _compute_overall_accuracy(labels, predictions):
+    """Compute sample-level accuracy as a percentage."""
+    labels = np.asarray(labels).reshape(-1)
+    predictions = np.asarray(predictions).reshape(-1)
+    if labels.shape != predictions.shape:
+        raise ValueError("labels and predictions must have the same shape")
+    return float(np.mean(labels == predictions) * 100.0) if labels.size else 0.0
+
+
 def _compute_dataset_metrics(labels, predictions, dataset, prefix):
-    """Keep Office metrics unchanged while using fixed-class VisDA metrics."""
+    """Use overall Office accuracy and fixed-class VisDA metrics."""
     if dataset == "VISDA-C":
         from visda_otta.evaluator import compute_metrics
 
         return compute_metrics(labels, predictions, prefix)
-    accuracy, per_class = _compute_metrics(labels, predictions)
+    _, per_class = _compute_metrics(labels, predictions)
+    accuracy = _compute_overall_accuracy(labels, predictions)
     return {f"{prefix}-Acc": accuracy, f"{prefix}-Acc-per-class": per_class}
+
+
+def _snapshot_bn_buffers(*models):
+    """Snapshot persistent buffers for every BatchNorm module in ``models``."""
+    snapshots = []
+    for model in models:
+        for module in model.modules():
+            if not isinstance(module, nn.modules.batchnorm._BatchNorm):
+                continue
+            buffers = {}
+            for name in (
+                "running_mean",
+                "running_var",
+                "num_batches_tracked",
+            ):
+                value = getattr(module, name)
+                buffers[name] = (
+                    value.detach().clone() if value is not None else None
+                )
+            snapshots.append(
+                (module, buffers)
+            )
+    return snapshots
+
+
+def _restore_bn_buffers(snapshots):
+    """Restore BN buffers without changing module train/eval modes."""
+    with torch.no_grad():
+        for module, buffers in snapshots:
+            for name, snapshot in buffers.items():
+                current = getattr(module, name)
+                if current is not None and snapshot is not None:
+                    current.copy_(snapshot)
+
+
+def _post_update_forward(inputs, net_f, net_b, net_c, preserve_bn_state=False):
+    """Run PU measurement forward, optionally discarding its BN buffer updates."""
+    bn_snapshot = (
+        _snapshot_bn_buffers(net_f, net_b, net_c)
+        if preserve_bn_state
+        else None
+    )
+    try:
+        with torch.no_grad():
+            return net_c(net_b(net_f(inputs)))
+    finally:
+        if bn_snapshot is not None:
+            _restore_bn_buffers(bn_snapshot)
 
 
 def _evaluate(loader, net_f, net_b, net_c, device, dataset):
@@ -867,13 +1212,14 @@ def _run_single_experiment(
         raise ValueError(
             "--resume-run-dir requires --enable-stream-checkpoint"
         )
-    if enable_stream_checkpoint and (
-        config["data"]["dataset"] != "VISDA-C"
-        or config["variant"] != "module_lbi"
-    ):
+    if enable_stream_checkpoint and config["variant"] != "module_lbi":
         raise ValueError(
-            "stream checkpointing is restricted to VISDA-C module_lbi"
+            "stream checkpointing is restricted to module_lbi"
         )
+    if resume_run_dir and config["variant"] != "module_lbi":
+        raise ValueError("stream resume is restricted to module_lbi")
+    if config.get("formal_protocol") and config["output"].get("save_model"):
+        raise ValueError("formal protocol requires save_model=false")
     started_at_utc = datetime.now(timezone.utc).isoformat()
     segment_started_at = time.perf_counter()
     seed = int(config["seed"])
@@ -967,9 +1313,13 @@ def _run_single_experiment(
 
     all_post_predictions = []
     all_online_labels = []
+    online_correct = 0
+    online_total = 0
     iteration = 0
     loader_batches_processed = 0
     runtime_before_resume = 0.0
+    wall_runtime_before_resume = 0.0
+    online_runtime_before_resume = 0.0
     max_iterations = len(loaders["target"])
     loss_config = config["loss"]
     dynamic_selection_history = []
@@ -983,13 +1333,53 @@ def _run_single_experiment(
             raise RuntimeError("invalid loader batch position in checkpoint")
         all_post_predictions = resume_payload["all_post_predictions"]
         all_online_labels = resume_payload["all_online_labels"]
+        for predictions, labels in zip(
+            all_post_predictions, all_online_labels
+        ):
+            online_correct += int(
+                torch.count_nonzero(predictions == labels).item()
+            )
+            online_total += int(labels.numel())
         dynamic_selection_history = resume_payload[
             "dynamic_selection_history"
         ]
         started_at_utc = resume_payload["started_at_utc"]
         runtime_before_resume = float(resume_payload["runtime_seconds"])
+        wall_runtime_before_resume = float(
+            resume_payload.get("wall_runtime_sec", runtime_before_resume)
+        )
+        online_runtime_before_resume = float(
+            resume_payload.get("online_compute_runtime_sec", 0.0)
+        )
         resume_rng_state = resume_payload["rng_state"]
         _truncate_metrics_to_checkpoint(artifact_paths["metrics"], iteration)
+    runtime_tracker = RuntimeInstrumentation(
+        device,
+        runtime_comparable=(
+            config.get("runtime", {}).get("runtime_comparable", False)
+            and config.get("runtime", {}).get("workers_per_gpu") == 1
+        ),
+    )
+    runtime_tracker.runtime_resume_used = resume_payload is not None
+    runtime_tracker.runtime_segment_count = (
+        int(resume_payload.get("runtime_segment_count", 1)) + 1
+        if resume_payload is not None
+        else 1
+    )
+    if resume_payload is not None:
+        restored_records = resume_payload.get("batch_efficiency_records", [])
+        if restored_records:
+            runtime_tracker.restore_batch_efficiency(restored_records)
+        else:
+            # Checkpoints created before raw records were introduced retain
+            # their legacy total rather than silently reporting zero.
+            runtime_tracker.online_compute_runtime_sec = (
+                online_runtime_before_resume
+            )
+    else:
+        runtime_tracker.online_compute_runtime_sec = (
+            online_runtime_before_resume
+        )
     visda_batch_metadata = (
         {
             "batch_size": int(config["data"]["batch_size"]),
@@ -1033,6 +1423,11 @@ def _run_single_experiment(
         labels = labels.to(device)
         iteration += 1
         all_online_labels.append(labels.cpu())
+        runtime_tracker.begin_batch(
+            batch_index=loader_batch_index - 1,
+            batch_size=inputs.size(0),
+        )
+        adaptation_started_at = runtime_tracker.start_adaptation()
         step_selection_stats = selection_stats
         if config["variant"] == "source_only":
             total_loss_value = None
@@ -1042,9 +1437,6 @@ def _run_single_experiment(
             pseudo_ratio = None
             max_probability_mean = None
             current_lr = None
-            with torch.no_grad():
-                post_outputs = net_c(net_b(net_f(inputs)))
-                post_predictions = post_outputs.argmax(dim=1)
         elif config["variant"] == "module_lbi":
             lbi_config = {
                 **config["lbi"],
@@ -1064,6 +1456,7 @@ def _run_single_experiment(
                 list(masked_parameter_lookup.items()),
                 lbi_loss_closure,
                 lbi_config,
+                timing=runtime_tracker,
             )
             lbi_step_stats = lbi_result.statistics
             dynamic_selection_history.append(lbi_step_stats)
@@ -1077,10 +1470,7 @@ def _run_single_experiment(
             diversity_loss_value = lbi_step_stats.get("loss_div")
             pseudo_ratio = lbi_step_stats.get("pseudo_ratio")
             max_probability_mean = lbi_step_stats.get("max_prob_mean")
-            current_lr = lbi_step_stats["stage2_effective_lr"]
-            with torch.no_grad():
-                post_outputs = net_c(net_b(net_f(inputs)))
-                post_predictions = post_outputs.argmax(dim=1)
+            current_lr = lbi_step_stats["stage2_lr"]
         else:
             _schedule_learning_rate(
                 config, optimizer, iteration, max_iterations
@@ -1122,10 +1512,6 @@ def _run_single_experiment(
             else:
                 optimizer.step()
 
-            with torch.no_grad():
-                post_outputs = net_c(net_b(net_f(inputs)))
-                post_predictions = post_outputs.argmax(dim=1)
-
             total_loss_value = float(total_loss.item())
             classification_loss_value = loss_parts["loss_cls"]
             entropy_loss_value = loss_parts["loss_ent"]
@@ -1134,16 +1520,43 @@ def _run_single_experiment(
             max_probability_mean = loss_parts["max_prob_mean"]
             current_lr = float(optimizer.param_groups[0]["lr"])
 
+        runtime_tracker.finish_adaptation(adaptation_started_at)
+        pu_started_at = runtime_tracker.start_pu()
+        post_outputs = _post_update_forward(
+            inputs,
+            net_f,
+            net_b,
+            net_c,
+            preserve_bn_state=config["variant"] == "full_dense",
+        )
+        post_predictions = post_outputs.argmax(dim=1)
+        runtime_tracker.finish_pu(pu_started_at)
+        efficiency_record = runtime_tracker.finish_batch()
+
         all_post_predictions.append(post_predictions.cpu())
 
+        batch_correct = int(
+            torch.count_nonzero(post_predictions == labels).item()
+        )
+        batch_total = int(labels.numel())
+        online_correct += batch_correct
+        online_total += batch_total
         post_accuracy = (
-            (post_predictions == labels).float().mean().item() * 100.0
+            100.0 * batch_correct / batch_total if batch_total else 0.0
         )
         metric_record = {
             "schema_version": SCHEMA_VERSION,
             "event": "online_step",
             "run_id": run_id,
             "variant": config["variant"],
+            "implementation_revision": config[
+                "implementation_revision"
+            ],
+            "protocol_revision": config.get("protocol_revision"),
+            "source_checkpoint_revision": config.get(
+                "source_checkpoint_revision"
+            ),
+            "source_checkpoints": source_paths,
             "experiment_key": config["experiment_key"],
             "experiment_config_sha256": config[
                 "experiment_config_sha256"
@@ -1157,6 +1570,17 @@ def _run_single_experiment(
             "lr": current_lr,
             "pseudo_ratio": pseudo_ratio,
             "max_prob_mean": max_probability_mean,
+            **{
+                key: efficiency_record[key]
+                for key in BATCH_EFFICIENCY_FIELDS
+                if key in efficiency_record
+            },
+            "lbi_stage1_runtime_sec": efficiency_record.get(
+                "lbi_stage1_runtime_sec"
+            ),
+            "lbi_stage2_runtime_sec": efficiency_record.get(
+                "lbi_stage2_runtime_sec"
+            ),
             **step_selection_stats,
         }
         append_jsonl(artifact_paths["metrics"], metric_record)
@@ -1180,6 +1604,18 @@ def _run_single_experiment(
                     runtime_before_resume
                     + time.perf_counter() - segment_started_at
                 ),
+                online_compute_runtime_sec=(
+                    runtime_tracker.online_compute_runtime_sec
+                ),
+                wall_runtime_sec=(
+                    wall_runtime_before_resume
+                    + time.perf_counter() - segment_started_at
+                ),
+                batch_efficiency_records=(
+                    runtime_tracker.batch_efficiency_records
+                ),
+                runtime_resume_used=runtime_tracker.runtime_resume_used,
+                runtime_segment_count=runtime_tracker.runtime_segment_count,
             )
         if interruption["signum"] is not None:
             reason = (
@@ -1220,12 +1656,27 @@ def _run_single_experiment(
             "PU",
         )
     pu_accuracy = pu_metrics["PU-Acc"]
+    if config["data"]["dataset"] != "VISDA-C":
+        # The Office PU main metric is the same correct/total accumulation
+        # represented by all post-update predictions, not a class average.
+        pu_accuracy = (
+            100.0 * online_correct / online_total
+            if online_total
+            else 0.0
+        )
     pu_per_class = pu_metrics["PU-Acc-per-class"]
 
     net_f.eval()
     net_b.eval()
-    fo_metrics = _evaluate(
-        loaders["test"], net_f, net_b, net_c, device, config["data"]["dataset"]
+    fo_metrics = runtime_tracker.measure_fo(
+        lambda: _evaluate(
+            loaders["test"],
+            net_f,
+            net_b,
+            net_c,
+            device,
+            config["data"]["dataset"],
+        )
     )
     fo_accuracy = fo_metrics["FO-Acc"]
     fo_per_class = fo_metrics["FO-Acc-per-class"]
@@ -1241,9 +1692,12 @@ def _run_single_experiment(
             output_dir, net_f, net_b, net_c
         )
 
-    runtime = float(
-        runtime_before_resume + time.perf_counter() - segment_started_at
+    wall_runtime_sec = float(
+        wall_runtime_before_resume
+        + time.perf_counter() - segment_started_at
     )
+    runtime = wall_runtime_sec
+    runtime_metadata = runtime_tracker.metadata()
     completed_at_utc = datetime.now(timezone.utc).isoformat()
     final_selection_stats = selection_stats
     if config["variant"] == "module_saliency":
@@ -1285,6 +1739,9 @@ def _run_single_experiment(
             "event": "final",
             "run_id": run_id,
             "variant": config["variant"],
+            "implementation_revision": config[
+                "implementation_revision"
+            ],
             "experiment_key": config["experiment_key"],
             "experiment_config_sha256": config[
                 "experiment_config_sha256"
@@ -1296,6 +1753,8 @@ def _run_single_experiment(
             "FO-Acc-per-class": fo_per_class,
             "online_steps": iteration,
             "runtime": runtime,
+            "wall_runtime_sec": wall_runtime_sec,
+            **runtime_metadata,
             **visda_metrics,
             **final_selection_stats,
         },
@@ -1318,6 +1777,10 @@ def _run_single_experiment(
             f"{config['data']['target_name']}"
         ),
         "seed": seed,
+        "implementation_revision": config["implementation_revision"],
+        "protocol_revision": config.get("protocol_revision"),
+        "source_checkpoint_revision": config.get("source_checkpoint_revision"),
+        "source_checkpoints": source_paths,
         "started_at_utc": started_at_utc,
         "completed_at_utc": completed_at_utc,
         "experiment_key": config["experiment_key"],
@@ -1329,12 +1792,17 @@ def _run_single_experiment(
         "PU-Acc-per-class": pu_per_class,
         "FO-Acc-per-class": fo_per_class,
         "runtime": runtime,
+        "wall_runtime_sec": wall_runtime_sec,
+        **runtime_metadata,
         "online_steps": iteration,
         "checkpoints": checkpoint_paths,
         **visda_metrics,
         **final_selection_stats,
     }
     dump_json(artifact_paths["summary"], summary)
+    _update_manifest_runtime(
+        artifact_paths, runtime_metadata, wall_runtime_sec
+    )
     if enable_stream_checkpoint:
         paths = _stream_checkpoint_paths(output_dir)
         _atomic_json_dump(
@@ -1343,10 +1811,19 @@ def _run_single_experiment(
                 "schema_version": STREAM_CHECKPOINT_SCHEMA_VERSION,
                 "status": "completed",
                 "run_id": run_id,
+                "implementation_revision": config[
+                    "implementation_revision"
+                ],
                 "experiment_key": config["experiment_key"],
                 "experiment_config_sha256": config[
                     "experiment_config_sha256"
                 ],
+                "efficiency_protocol_revision": EFFICIENCY_PROTOCOL_REVISION,
+                "runtime_resume_used": runtime_tracker.runtime_resume_used,
+                "runtime_segment_count": runtime_tracker.runtime_segment_count,
+                "efficiency_batch_count": len(
+                    runtime_tracker.batch_efficiency_records
+                ),
                 "iteration": int(iteration),
                 "loader_batches_processed": int(loader_batches_processed),
                 "updated_at_utc": completed_at_utc,
@@ -1423,9 +1900,84 @@ def _run_random_experiment(config, workspace_root):
             {
                 "mask_id": mask_id,
                 "mask_seed": mask_seed,
+                "implementation_revision": config[
+                    "implementation_revision"
+                ],
                 "PU-Acc": result["PU-Acc"],
                 "FO-Acc": result["FO-Acc"],
                 "runtime": result["runtime"],
+                "online_compute_runtime_sec": result.get(
+                    "online_compute_runtime_sec"
+                ),
+                "fo_eval_runtime_sec": result.get("fo_eval_runtime_sec"),
+                "wall_runtime_sec": result.get("wall_runtime_sec"),
+                "efficiency_protocol_revision": result.get(
+                    "efficiency_protocol_revision"
+                ),
+                "runtime_resume_used": result.get(
+                    "runtime_resume_used", False
+                ),
+                "runtime_segment_count": result.get(
+                    "runtime_segment_count", 1
+                ),
+                "online_batch_runtime_mean_sec": result.get(
+                    "online_batch_runtime_mean_sec"
+                ),
+                "online_batch_runtime_std_sec": result.get(
+                    "online_batch_runtime_std_sec"
+                ),
+                "online_batch_runtime_median_sec": result.get(
+                    "online_batch_runtime_median_sec"
+                ),
+                "online_batch_runtime_p95_sec": result.get(
+                    "online_batch_runtime_p95_sec"
+                ),
+                "adapt_batch_runtime_mean_sec": result.get(
+                    "adapt_batch_runtime_mean_sec"
+                ),
+                "adapt_batch_runtime_std_sec": result.get(
+                    "adapt_batch_runtime_std_sec"
+                ),
+                "adapt_runtime_total_sec": result.get(
+                    "adapt_runtime_total_sec"
+                ),
+                "pu_batch_runtime_mean_sec": result.get(
+                    "pu_batch_runtime_mean_sec"
+                ),
+                "pu_batch_runtime_std_sec": result.get(
+                    "pu_batch_runtime_std_sec"
+                ),
+                "pu_runtime_total_sec": result.get(
+                    "pu_runtime_total_sec"
+                ),
+                "peak_gpu_memory_allocated_mb": result.get(
+                    "peak_gpu_memory_allocated_mb"
+                ),
+                "peak_gpu_memory_reserved_mb": result.get(
+                    "peak_gpu_memory_reserved_mb"
+                ),
+                "peak_gpu_memory_allocated_bytes": result.get(
+                    "peak_gpu_memory_allocated_bytes"
+                ),
+                "peak_gpu_memory_reserved_bytes": result.get(
+                    "peak_gpu_memory_reserved_bytes"
+                ),
+                "gpu_peak_allocated_mean_mb": result.get(
+                    "gpu_peak_allocated_mean_mb"
+                ),
+                "gpu_peak_reserved_mean_mb": result.get(
+                    "gpu_peak_reserved_mean_mb"
+                ),
+                "gpu_peak_allocated_max_mb": result.get(
+                    "gpu_peak_allocated_max_mb"
+                ),
+                "gpu_peak_reserved_max_mb": result.get(
+                    "gpu_peak_reserved_max_mb"
+                ),
+                "gpu_name": result.get("gpu_name"),
+                "runtime_comparable": result.get(
+                    "runtime_comparable", False
+                ),
                 "started_at_utc": result["started_at_utc"],
                 "completed_at_utc": result["completed_at_utc"],
                 "result_path": osp.join(mask_dir, "results.json"),
@@ -1447,6 +1999,37 @@ def _run_random_experiment(config, workspace_root):
     completed_at_utc = datetime.now(timezone.utc).isoformat()
     total_runtime = float(time.perf_counter() - started_at)
     selection_summary = result
+    child_online_runtime = [
+        item["online_compute_runtime_sec"]
+        for item in mask_results
+        if item["online_compute_runtime_sec"] is not None
+    ]
+    child_fo_runtime = [
+        item["fo_eval_runtime_sec"]
+        for item in mask_results
+        if item["fo_eval_runtime_sec"] is not None
+    ]
+    child_allocated = [
+        item["peak_gpu_memory_allocated_mb"]
+        for item in mask_results
+        if item["peak_gpu_memory_allocated_mb"] is not None
+    ]
+    child_reserved = [
+        item["peak_gpu_memory_reserved_mb"]
+        for item in mask_results
+        if item["peak_gpu_memory_reserved_mb"] is not None
+    ]
+    child_allocated_bytes = [
+        result.get("peak_gpu_memory_allocated_bytes")
+        for result in mask_results
+        if result.get("peak_gpu_memory_allocated_bytes") is not None
+    ]
+    child_reserved_bytes = [
+        result.get("peak_gpu_memory_reserved_bytes")
+        for result in mask_results
+        if result.get("peak_gpu_memory_reserved_bytes") is not None
+    ]
+    random_efficiency = aggregate_random_efficiency(mask_results)
     summary = {
         "schema_version": SCHEMA_VERSION,
         "status": "completed",
@@ -1474,6 +2057,10 @@ def _run_random_experiment(config, workspace_root):
         ),
         "seed": run_seed,
         "run_seed": run_seed,
+        "implementation_revision": config["implementation_revision"],
+        "protocol_revision": config.get("protocol_revision"),
+        "source_checkpoint_revision": config.get("source_checkpoint_revision"),
+        "source_checkpoints": selection_summary.get("source_checkpoints"),
         "requested_budget": float(config["requested_budget"]),
         # selection_seed identifies the fixed run-level setup; individual
         # masks and their seeds are recorded separately below.
@@ -1482,6 +2069,44 @@ def _run_random_experiment(config, workspace_root):
         "completed_at_utc": completed_at_utc,
         "runtime": total_runtime,
         "total_runtime": total_runtime,
+        **random_efficiency,
+        "fo_eval_runtime_sec": random_efficiency[
+            "fo_eval_runtime_sec"
+        ],
+        "fo_eval_runtime_mask_std_sec": random_efficiency[
+            "fo_eval_runtime_mask_std_sec"
+        ],
+        "random_total_fo_eval_runtime_sec": random_efficiency[
+            "random_total_fo_eval_runtime_sec"
+        ],
+        "wall_runtime_sec": total_runtime,
+        "peak_gpu_memory_allocated_mb": (
+            max(child_allocated) if child_allocated else None
+        ),
+        "peak_gpu_memory_reserved_mb": (
+            max(child_reserved) if child_reserved else None
+        ),
+        "gpu_name": selection_summary.get("gpu_name"),
+        "gpu_device_index": selection_summary.get("gpu_device_index"),
+        "gpu_total_memory_bytes": selection_summary.get(
+            "gpu_total_memory_bytes"
+        ),
+        "peak_gpu_memory_allocated_bytes": (
+            max(child_allocated_bytes) if child_allocated_bytes else None
+        ),
+        "peak_gpu_memory_reserved_bytes": (
+            max(child_reserved_bytes) if child_reserved_bytes else None
+        ),
+        "torch_version": selection_summary.get("torch_version"),
+        "cuda_version": selection_summary.get("cuda_version"),
+        "runtime_comparable": all(
+            item.get("runtime_comparable", False) for item in mask_results
+        ),
+        "efficiency_protocol_revision": config.get("runtime", {}).get(
+            "efficiency_protocol_revision", EFFICIENCY_PROTOCOL_REVISION
+        ),
+        "runtime_resume_used": False,
+        "runtime_segment_count": 1,
         "mask_seeds": [result["mask_seed"] for result in mask_results],
         "experiment_key": config["experiment_key"],
         "experiment_config_sha256": config["experiment_config_sha256"],

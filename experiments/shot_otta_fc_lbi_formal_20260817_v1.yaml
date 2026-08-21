@@ -1,0 +1,35 @@
+protocol_revision: OTTA_FC_LBI_PROTOCOL_20260817_v1
+formal_protocol: true
+method: shot
+task: otta
+
+datasets:
+  office:
+    transfers: all_ordered_pairs
+  VISDA-C:
+    transfers: [[0, 1]]
+
+seeds: [2026]
+
+variants:
+  source_only: {}
+  full_dense: {}
+  module_dense: {}
+  module_random:
+    budgets: [0.0005, 0.001, 0.002]
+    selection_seed_mode: same_as_run_seed
+    num_random_masks: 3
+  module_magnitude:
+    budgets: [0.0005, 0.001, 0.002]
+  module_saliency:
+    budgets: [0.0005, 0.001, 0.002]
+  module_lbi:
+    budgets: [0.0005, 0.001, 0.002]
+    lbi_tuned: unresolved
+
+common_training:
+  workers: 4
+  gpu_id: "0"
+  save_model: false
+
+output_root: 260817_iclr2027-refined/runs

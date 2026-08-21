@@ -15,6 +15,7 @@ REQUIRED_SUMMARY_FIELDS = {
 }
 LEGAL_RUN_STATUSES = {"completed", "failed", "incomplete"}
 STATUS_CSV_FIELDS = [
+    "implementation_revision",
     "experiment_key",
     "experiment_config_sha256",
     "method",
@@ -31,6 +32,40 @@ STATUS_CSV_FIELDS = [
     "matching_summary_paths",
     "hash_mismatch_paths",
     "invalid_summary_paths",
+    "efficiency_protocol_revision",
+    "online_batch_runtime_mean_sec",
+    "online_batch_runtime_std_sec",
+    "online_batch_runtime_median_sec",
+    "online_batch_runtime_p95_sec",
+    "online_compute_runtime_sec",
+    "online_batch_runtime_mask_std_sec",
+    "online_compute_runtime_mask_std_sec",
+    "random_total_online_compute_runtime_sec",
+    "adapt_batch_runtime_mean_sec",
+    "adapt_batch_runtime_std_sec",
+    "adapt_runtime_total_sec",
+    "pu_batch_runtime_mean_sec",
+    "pu_batch_runtime_std_sec",
+    "pu_runtime_total_sec",
+    "gpu_peak_allocated_mean_mb",
+    "gpu_peak_allocated_max_mb",
+    "gpu_peak_reserved_mean_mb",
+    "gpu_peak_reserved_max_mb",
+    "fo_eval_runtime_sec",
+    "wall_runtime_sec",
+    "peak_gpu_memory_allocated_mb",
+    "peak_gpu_memory_reserved_mb",
+    "gpu_device_index",
+    "torch_version",
+    "cuda_version",
+    "runtime_resume_used",
+    "runtime_segment_count",
+    "gpu_name",
+    "runtime_comparable",
+]
+
+EFFICIENCY_FIELDS = STATUS_CSV_FIELDS[
+    STATUS_CSV_FIELDS.index("efficiency_protocol_revision") :
 ]
 
 
@@ -149,11 +184,11 @@ def classify_plan(plan, records, invalid_records):
         else:
             status = "missing"
 
-        statuses.append(
-            {
+        status_row = {
                 **{
                     field: experiment.get(field)
                     for field in (
+                        "implementation_revision",
                         "experiment_key",
                         "experiment_config_sha256",
                         "method",
@@ -179,7 +214,17 @@ def classify_plan(plan, records, invalid_records):
                     record["summary_path"] for record in invalid
                 ],
             }
-        )
+        if len(completed) == 1:
+            completed_summary = completed[0]["summary"]
+            status_row.update(
+                {
+                    field: completed_summary.get(field)
+                    for field in EFFICIENCY_FIELDS
+                }
+            )
+        else:
+            status_row.update({field: None for field in EFFICIENCY_FIELDS})
+        statuses.append(status_row)
     return statuses
 
 

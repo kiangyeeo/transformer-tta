@@ -6,7 +6,19 @@ import os.path as osp
 
 import yaml
 
-from experiment_identity import resolve_experiment_identity
+from experiment_identity import (
+    EFFICIENCY_PROTOCOL_REVISION,
+    resolve_experiment_identity,
+)
+from protocol_constants import (
+    FORMAL_SEED,
+    LBI_FROZEN_CONSTANTS,
+    PROTOCOL_REVISION,
+    SOURCE_CHECKPOINT_REVISION,
+)
+
+
+DEFAULT_LBI_SUPPORT_THRESHOLD = 1.0e-4
 
 
 DATASETS = {
@@ -60,6 +72,14 @@ def apply_overrides(config, args):
     for (section, key), value in direct_overrides.items():
         if value is not None:
             effective[section][key] = value
+    if getattr(args, "workers_per_gpu", None) is not None:
+        effective.setdefault("runtime", {})[
+            "workers_per_gpu"
+        ] = args.workers_per_gpu
+    if getattr(args, "runtime_comparable", False):
+        effective.setdefault("runtime", {})[
+            "runtime_comparable"
+        ] = True
     if args.seed is not None:
         effective["seed"] = args.seed
     if args.variant is not None:
@@ -86,10 +106,16 @@ def apply_overrides(config, args):
         "delta_nonzero_tolerance": getattr(
             args, "lbi_delta_nonzero_tolerance", None
         ),
+        "support_threshold": getattr(
+            args, "lbi_support_threshold", None
+        ),
     }
+    if any(value is not None for value in lbi_overrides.values()):
+        if effective.get("lbi") is None:
+            effective["lbi"] = {}
     for key, value in lbi_overrides.items():
         if value is not None:
-            effective.setdefault("lbi", {})[key] = value
+            effective["lbi"][key] = value
     if args.experiment_key is not None:
         effective["experiment_key"] = args.experiment_key
     if args.experiment_config_sha256 is not None:
@@ -105,8 +131,51 @@ def apply_overrides(config, args):
 
 def resolve_effective_config(config, workspace_root):
     effective = copy.deepcopy(config)
+    if effective.get("formal_protocol"):
+        dataset_name = effective.get("data", {}).get("dataset")
+        dataset_settings = effective.get("formal_dataset_settings", {}).get(
+            dataset_name
+        )
+        if dataset_settings is None:
+            raise ValueError(
+                f"formal protocol has no dataset settings for {dataset_name}"
+            )
+        effective["data"].update(
+            {
+                "batch_size": int(dataset_settings["batch_size"]),
+                "workers": int(dataset_settings["workers"]),
+            }
+        )
+        effective["model"]["backbone"] = dataset_settings["backbone"]
+        effective["optimization"]["lr"] = float(dataset_settings["lr"])
+        if int(effective.get("seed", FORMAL_SEED)) != FORMAL_SEED:
+            raise ValueError(f"formal protocol requires seed={FORMAL_SEED}")
+        effective["seed"] = FORMAL_SEED
+        effective["source_checkpoint_revision"] = SOURCE_CHECKPOINT_REVISION
+        effective["protocol_revision"] = PROTOCOL_REVISION
+        effective["lbi_protocol"] = copy.deepcopy(LBI_FROZEN_CONSTANTS)
+    runtime = effective.setdefault("runtime", {})
+    runtime.setdefault("workers_per_gpu", None)
+    runtime.setdefault("runtime_comparable", False)
+    if runtime["workers_per_gpu"] is not None:
+        if (
+            isinstance(runtime["workers_per_gpu"], bool)
+            or int(runtime["workers_per_gpu"]) != runtime["workers_per_gpu"]
+            or int(runtime["workers_per_gpu"]) < 1
+        ):
+            raise ValueError(
+                "runtime.workers_per_gpu must be a positive integer"
+            )
+        runtime["workers_per_gpu"] = int(runtime["workers_per_gpu"])
+    runtime["runtime_comparable"] = bool(
+        runtime["runtime_comparable"]
+        and runtime["workers_per_gpu"] == 1
+    )
+    runtime["efficiency_protocol_revision"] = (
+        EFFICIENCY_PROTOCOL_REVISION
+    )
     effective.setdefault("requested_budget", 0.1)
-    effective.setdefault("selection_seed", effective.get("seed", 2020))
+    effective.setdefault("selection_seed", effective.get("seed", FORMAL_SEED))
     effective.setdefault("num_random_masks", 3)
     if effective.get("method") != "shot":
         raise ValueError("The first-stage refactor only supports method=shot")
@@ -172,7 +241,14 @@ def resolve_effective_config(config, workspace_root):
         effective["selection_seed"] = None
         effective["num_random_masks"] = None
     if effective["variant"] == "module_lbi":
-        validate_lbi_config(effective.get("lbi"))
+        if effective.get("lbi") is None:
+            if not effective.get("allow_unresolved_lbi", False):
+                raise ValueError(
+                    "module_lbi requires a resolved tuned tuple; "
+                    "formal launch is blocked until it is provided"
+                )
+        else:
+            validate_lbi_config(effective.get("lbi"))
 
     data_config = effective["data"]
     dataset_name = data_config["dataset"]
@@ -243,6 +319,10 @@ def resolve_effective_config(config, workspace_root):
     effective["experiment_config_sha256"] = identity[
         "experiment_config_sha256"
     ]
+    effective["implementation_revision"] = identity[
+        "scientific_config"
+    ]["implementation_revision"]
+    effective["scientific_config"] = identity["scientific_config"]
     return effective
 
 
@@ -259,7 +339,9 @@ def validate_lbi_config(lbi):
         "stage2_lr",
         "stage2_steps",
         "delta_nonzero_tolerance",
+        "support_threshold",
     }
+    lbi.setdefault("support_threshold", DEFAULT_LBI_SUPPORT_THRESHOLD)
     missing = sorted(required - set(lbi))
     if missing:
         raise ValueError(f"Missing LBI config fields: {missing}")
@@ -276,6 +358,7 @@ def validate_lbi_config(lbi):
         "budget_tolerance",
         "stage2_lr",
         "delta_nonzero_tolerance",
+        "support_threshold",
     ):
         value = float(lbi[key])
         if not math.isfinite(value):
@@ -297,6 +380,8 @@ def validate_lbi_config(lbi):
         raise ValueError(
             "lbi.delta_nonzero_tolerance must be >= 0"
         )
+    if lbi["support_threshold"] < 0:
+        raise ValueError("lbi.support_threshold must be >= 0")
     for key in ("stage1_max_steps", "stage2_steps"):
         value = lbi[key]
         if isinstance(value, bool) or int(value) != value or int(value) <= 0:

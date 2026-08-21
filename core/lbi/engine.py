@@ -11,17 +11,17 @@ import math
 import torch
 import torch.optim as optim
 
-from .diagnostics import compute_lbi_step_budget_diagnostics
+from .diagnostics import (
+    compute_lbi_step_budget_diagnostics,
+    max_support_count,
+)
 from .state import LBIResult, LBIState
 
 
-SUPPORT_THRESHOLD = 1.0e-4
 STAGE2_OPTIMIZER = "sgd"
 STAGE2_MOMENTUM = 0.9
 STAGE2_WEIGHT_DECAY = 1.0e-3
 STAGE2_NESTEROV = True
-STAGE2_LR_GAMMA = 10.0
-STAGE2_LR_POWER = 0.75
 
 
 def _loss_and_parts(loss_output):
@@ -44,9 +44,10 @@ def _copy_map(named_parameters, values):
             parameter.copy_(values[name])
 
 
-def _support_masks(gamma):
+def _support_masks(gamma, support_threshold):
+    """Build the sole thresholded support used by all LBI stages."""
     return {
-        name: value.detach().abs().gt(SUPPORT_THRESHOLD)
+        name: value.detach().abs().ge(support_threshold)
         for name, value in gamma.items()
     }
 
@@ -143,6 +144,7 @@ class SplitLBIEngine:
             "stage2_lr",
             "stage2_steps",
             "delta_nonzero_tolerance",
+            "support_threshold",
             "requested_budget",
         }
         missing = sorted(required - set(config))
@@ -156,6 +158,7 @@ class SplitLBIEngine:
             "budget_tolerance",
             "stage2_lr",
             "delta_nonzero_tolerance",
+            "support_threshold",
             "requested_budget",
         ):
             if not math.isfinite(float(config[key])):
@@ -182,6 +185,10 @@ class SplitLBIEngine:
             raise ValueError(
                 "Split-LBI delta_nonzero_tolerance must be >= 0"
             )
+        if float(config["support_threshold"]) < 0:
+            raise ValueError(
+                "Split-LBI support_threshold must be >= 0"
+            )
         for key in ("stage1_max_steps", "stage2_steps"):
             value = config[key]
             if (
@@ -193,7 +200,7 @@ class SplitLBIEngine:
                     f"Split-LBI {key} must be a positive integer"
                 )
 
-    def run_step(self, candidate_parameters, loss_closure, config):
+    def run_step(self, candidate_parameters, loss_closure, config, timing=None):
         """Run Stage 1, Stage 2, and Stage 3 on the current online batch."""
         candidate_parameters = list(candidate_parameters)
         self._validate(candidate_parameters, config)
@@ -207,15 +214,20 @@ class SplitLBIEngine:
         alpha = float(config["alpha"])
         kappa = float(config["kappa"])
         nu = float(config["nu"])
+        support_threshold = float(config["support_threshold"])
         requested_budget = float(config["requested_budget"])
-        budget_target = requested_budget + float(
-            config["budget_tolerance"]
-        )
+        max_support = max_support_count(requested_budget, candidate_count)
+        # This implementation deliberately uses a strict-budget rollback
+        # variant: the selected state must never exceed max_support.
+        # budget_tolerance remains recorded for experiment compatibility but
+        # is not a relaxation of the selected-support constraint.
         max_steps = int(config["stage1_max_steps"])
         stage1_branch_enabled = requested_budget > 0.0
 
-        feasible_state = state.clone() if not stage1_branch_enabled else None
-        feasible_step = 0 if not stage1_branch_enabled else None
+        # The zero initialization is always feasible.  Retaining it ensures
+        # an immediate support overshoot still rolls back below the budget.
+        feasible_state = state.clone()
+        feasible_step = 0
         stage1_steps_completed = 0
         stage1_final_loss = None
         stage1_stop_reason = (
@@ -225,75 +237,82 @@ class SplitLBIEngine:
         )
         stage1_rollback_used = False
 
-        stage1_iterations = (
-            range(max_steps) if stage1_branch_enabled else ()
-        )
-        for step_index in stage1_iterations:
-            # Old Stage 1 evaluates the SHOT loss at base + theta_delta.
-            with torch.no_grad():
-                for name, parameter in candidate_parameters:
-                    parameter.add_(state.theta_delta[name])
-            try:
-                stage1_loss, _ = _loss_and_parts(loss_closure())
-                gradients = torch.autograd.grad(
-                    stage1_loss,
-                    [parameter for _, parameter in candidate_parameters],
-                )
-            finally:
-                _copy_map(candidate_parameters, base_parameters)
-
-            stage1_final_loss = float(stage1_loss.item())
-            stage1_steps_completed = step_index + 1
-
-            # Exact old update order:
-            # theta_delta <- theta_delta - alpha*kappa*(grad + coupling)
-            for (name, _), gradient in zip(
-                candidate_parameters, gradients
-            ):
-                coupling = (
-                    state.theta_delta[name] - state.gamma[name]
-                ) / nu
-                state.theta_delta[name] = (
-                    state.theta_delta[name]
-                    - alpha * kappa * (gradient + coupling)
-                )
-
-            # z <- z + alpha*(theta_delta-gamma)/nu
-            for name, _ in candidate_parameters:
-                state.z[name] = state.z[name] + alpha * (
-                    state.theta_delta[name] - state.gamma[name]
-                ) / nu
-
-            # gamma <- kappa*sign(z)*max(abs(z)-1, 0)
-            for name, _ in candidate_parameters:
-                state.gamma[name] = self.element_prox(
-                    state.z[name], kappa
-                )
-
-            state.mask = _support_masks(state.gamma)
-            support_count = _support_count(state.mask)
-            support_ratio = (
-                float(support_count / candidate_count)
-                if candidate_count > 0
-                else 0.0
+        stage1_started_at = timing.start("lbi_stage1") if timing else None
+        try:
+            stage1_iterations = (
+                range(max_steps) if stage1_branch_enabled else ()
             )
-            if support_ratio <= budget_target:
-                feasible_state = state.clone()
-                feasible_step = stage1_steps_completed
+            for step_index in stage1_iterations:
+                # Old Stage 1 evaluates the SHOT loss at base + theta_delta.
+                with torch.no_grad():
+                    for name, parameter in candidate_parameters:
+                        parameter.add_(state.theta_delta[name])
+                try:
+                    stage1_loss, _ = _loss_and_parts(loss_closure())
+                    gradients = torch.autograd.grad(
+                        stage1_loss,
+                        [parameter for _, parameter in candidate_parameters],
+                    )
+                finally:
+                    _copy_map(candidate_parameters, base_parameters)
 
-            if support_ratio >= requested_budget:
-                stage1_stop_reason = "cross_no_feasible"
-                if feasible_state is not None:
-                    state = feasible_state.clone()
-                    stage1_stop_reason = "rollback_feasible"
-                    stage1_rollback_used = True
-                break
-        else:
-            if stage1_branch_enabled and feasible_state is not None:
+                stage1_final_loss = float(stage1_loss.item())
+                stage1_steps_completed = step_index + 1
+
+                # Eq. (5) uses the coupling from the old local state.  Keep it
+                # separate so both theta_delta and z consume c^k, not c^(k+1).
+                old_coupling = {
+                    name: (state.theta_delta[name] - state.gamma[name]) / nu
+                    for name, _ in candidate_parameters
+                }
+
+                # theta_delta^(k+1) = theta_delta^k
+                #   - alpha*kappa*(grad + c^k)
+                for (name, _), gradient in zip(
+                    candidate_parameters, gradients
+                ):
+                    state.theta_delta[name] = (
+                        state.theta_delta[name]
+                        - alpha * kappa * (gradient + old_coupling[name])
+                    )
+
+                # z^(k+1) = z^k + alpha*c^k
+                for name, _ in candidate_parameters:
+                    state.z[name] = state.z[name] + alpha * old_coupling[name]
+
+                # gamma <- kappa*sign(z)*max(abs(z)-1, 0)
+                for name, _ in candidate_parameters:
+                    state.gamma[name] = self.element_prox(
+                        state.z[name], kappa
+                    )
+
+                state.mask = _support_masks(state.gamma, support_threshold)
+                support_count = _support_count(state.mask)
+                if support_count < max_support:
+                    feasible_state = state.clone()
+                    feasible_step = stage1_steps_completed
+                    continue
+
+                if support_count == max_support:
+                    # The current state is feasible and reaches the integer
+                    # budget exactly, so retain it without a rollback.
+                    feasible_state = state.clone()
+                    feasible_step = stage1_steps_completed
+                    stage1_stop_reason = "budget_reached"
+                    break
+
+                # Only an over-budget state is rejected and restored.  This is
+                # the strict-budget rollback variant, not the paper's direct
+                # stopping rule.
                 state = feasible_state.clone()
+                stage1_stop_reason = "strict_budget_rollback"
                 stage1_rollback_used = True
+                break
+        finally:
+            if timing:
+                timing.stop("lbi_stage1", stage1_started_at)
 
-        state.mask = _support_masks(state.gamma)
+        state.mask = _support_masks(state.gamma, support_threshold)
         support_count = _support_count(state.mask)
         support_ratio = (
             float(support_count / candidate_count)
@@ -301,12 +320,18 @@ class SplitLBIEngine:
             else 0.0
         )
 
-        # Dense initialization: retain every Stage-1 theta_delta element.
-        dense_initial_parameters = {
-            name: base_parameters[name] + state.theta_delta[name]
+        # Initialize refinement only on gamma's selected support.  This keeps
+        # every mask-out value at the current online-step base parameter.
+        masked_delta_initial_parameters = {
+            name: base_parameters[name]
+            + state.mask[name].to(
+                device=state.theta_delta[name].device,
+                dtype=state.theta_delta[name].dtype,
+            )
+            * state.theta_delta[name]
             for name, _ in candidate_parameters
         }
-        _copy_map(candidate_parameters, dense_initial_parameters)
+        _copy_map(candidate_parameters, masked_delta_initial_parameters)
 
         # The local optimizer and its state are discarded when this call ends.
         stage2_lr = float(config["stage2_lr"])
@@ -321,44 +346,50 @@ class SplitLBIEngine:
             weight_decay=STAGE2_WEIGHT_DECAY,
             nesterov=STAGE2_NESTEROV,
         )
-        for group in stage2_optimizer.param_groups:
-            group["lr0"] = group["lr"]
 
         stage2_final_loss = None
         stage2_loss_parts = {}
         stage2_steps_completed = 0
-        stage2_effective_lr = stage2_lr
-        for stage2_index in range(stage2_steps_requested):
-            decay = (
-                1.0
-                + STAGE2_LR_GAMMA
-                * (stage2_index + 1)
-                / max(stage2_steps_requested, 1)
-            ) ** (-STAGE2_LR_POWER)
-            for group in stage2_optimizer.param_groups:
-                group["lr"] = group["lr0"] * decay
-                group["momentum"] = STAGE2_MOMENTUM
-                group["nesterov"] = STAGE2_NESTEROV
-
-            stage2_optimizer.zero_grad()
-            stage2_loss, stage2_loss_parts = _loss_and_parts(
-                loss_closure()
-            )
-            stage2_loss.backward()
-            for name, parameter in candidate_parameters:
-                if parameter.grad is not None:
-                    parameter.grad.mul_(
-                        state.mask[name].to(
-                            device=parameter.grad.device,
-                            dtype=parameter.grad.dtype,
+        stage2_started_at = timing.start("lbi_stage2") if timing else None
+        try:
+            for _ in range(stage2_steps_requested):
+                stage2_optimizer.zero_grad()
+                stage2_loss, stage2_loss_parts = _loss_and_parts(
+                    loss_closure()
+                )
+                stage2_loss.backward()
+                for name, parameter in candidate_parameters:
+                    if parameter.grad is not None:
+                        parameter.grad.mul_(
+                            state.mask[name].to(
+                                device=parameter.grad.device,
+                                dtype=parameter.grad.dtype,
+                            )
                         )
-                    )
-            stage2_optimizer.step()
-            stage2_final_loss = float(stage2_loss.item())
-            stage2_steps_completed = stage2_index + 1
-            stage2_effective_lr = float(
-                stage2_optimizer.param_groups[0]["lr"]
-            )
+                # Gradient masking alone cannot freeze parameter values when SGD
+                # has weight decay, momentum, or Nesterov enabled.  Preserve the
+                # full pre-step values and restore every mask-out element after
+                # the normal optimizer update; optimizer state remains untouched.
+                stage2_pre_step_parameters = _clone_map(candidate_parameters)
+                stage2_optimizer.step()
+                with torch.no_grad():
+                    for name, parameter in candidate_parameters:
+                        mask = state.mask[name].to(
+                            device=parameter.device,
+                            dtype=torch.bool,
+                        )
+                        parameter.copy_(
+                            torch.where(
+                                mask,
+                                parameter,
+                                stage2_pre_step_parameters[name],
+                            )
+                        )
+                stage2_final_loss = float(stage2_loss.item())
+                stage2_steps_completed += 1
+        finally:
+            if timing:
+                timing.stop("lbi_stage2", stage2_started_at)
 
         refined_parameters = _clone_map(candidate_parameters)
         tolerance = float(config["delta_nonzero_tolerance"])
@@ -405,20 +436,21 @@ class SplitLBIEngine:
             "lbi_kappa": kappa,
             "lbi_nu": nu,
             "lbi_omega": omega,
+            "lbi_support_threshold": support_threshold,
             "stage1_branch_enabled": stage1_branch_enabled,
             "stage1_steps_completed": stage1_steps_completed,
             "stage1_stop_reason": stage1_stop_reason,
             "stage1_rollback_used": stage1_rollback_used,
             "stage1_last_feasible_step": feasible_step,
             "stage1_feasible_found": feasible_state is not None,
-            "stage1_budget_target": budget_target,
+            "stage1_budget_target": requested_budget,
+            "stage1_max_support_count": max_support,
             "stage1_support_count": support_count,
             "stage1_support_ratio": support_ratio,
             "stage1_final_loss": stage1_final_loss,
             "stage2_steps_requested": stage2_steps_requested,
             "stage2_steps_completed": stage2_steps_completed,
             "stage2_lr": stage2_lr,
-            "stage2_effective_lr": stage2_effective_lr,
             "stage2_optimizer": STAGE2_OPTIMIZER,
             "stage2_final_loss": stage2_final_loss,
             "loss": stage2_final_loss,

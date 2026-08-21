@@ -4,12 +4,11 @@ import copy
 import hashlib
 import json
 
-from shot_otta.backbones.deit import candidate_parameter_names
-
-
-GROUP_RANDOM_PROTOCOL = "sequential_target_stream_group_random_adaptation"
-GROUP_MAGNITUDE_PROTOCOL = "sequential_target_stream_group_magnitude_adaptation"
-GROUP_SALIENCY_PROTOCOL = "sequential_target_stream_group_saliency_adaptation"
+from protocol_constants import (
+    EFFICIENCY_PROTOCOL_REVISION,
+    IMPLEMENTATION_REVISION,
+    SOURCE_CHECKPOINT_REVISION,
+)
 
 
 SUPPORTED_VARIANTS = {
@@ -47,6 +46,7 @@ VARIANT_METADATA = {
         "bn_stats_frozen": True,
         "mask_static": False,
         "mask_refresh_policy": None,
+        "budget_semantics": "global_fc_floor_integer",
     },
     "module_random": {
         "selection": "random",
@@ -56,6 +56,8 @@ VARIANT_METADATA = {
         "mask_static": True,
         "mask_refresh_policy": "once_before_adaptation",
         "ranking_source": "independent_random_generator",
+        "budget_semantics": "global_fc_floor_integer",
+        "masked_optimizer_state": "mask_out_momentum_zeroed",
     },
     "module_magnitude": {
         "selection": "magnitude",
@@ -65,6 +67,8 @@ VARIANT_METADATA = {
         "mask_static": True,
         "mask_refresh_policy": "once_before_adaptation",
         "ranking_source": "source_checkpoint_pre_adaptation",
+        "budget_semantics": "global_fc_floor_integer",
+        "masked_optimizer_state": "mask_out_momentum_zeroed",
     },
     "module_saliency": {
         "selection": "saliency",
@@ -75,6 +79,8 @@ VARIANT_METADATA = {
         "mask_refresh_policy": "every_online_step_after_backward",
         "ranking_source": "current_parameter_times_current_gradient",
         "saliency_score": "abs_parameter_times_gradient",
+        "budget_semantics": "global_fc_floor_integer",
+        "masked_optimizer_state": "mask_out_momentum_zeroed",
     },
     "module_lbi": {
         "selection": "lbi",
@@ -84,17 +90,15 @@ VARIANT_METADATA = {
         "mask_static": False,
         "mask_refresh_policy": "every_online_step_via_split_lbi",
         "ranking_source": "split_lbi_gamma_support",
-        "lbi_initialization": "dense",
+        "lbi_initialization": "masked_delta",
         "stage3_mode": "accumulation",
         "lbi_state_lifecycle": "reset_every_online_step",
-        "support_threshold": 1.0e-4,
         "stage2_optimizer": "sgd",
         "stage2_momentum": 0.9,
         "stage2_weight_decay": 1.0e-3,
         "stage2_nesterov": True,
-        "stage2_lr_policy": "shot",
-        "stage2_lr_gamma": 10.0,
-        "stage2_lr_power": 0.75,
+        "budget_semantics": "global_fc_floor_integer_strict_rollback",
+        "masked_optimizer_state": "lbi_stage2_local_optimizer_unchanged",
     },
 }
 
@@ -127,6 +131,7 @@ def build_scientific_config(config):
         raise ValueError(f"Unsupported variant for identity: {variant}")
     data = config["data"]
     scientific_config = {
+        "implementation_revision": IMPLEMENTATION_REVISION,
         "method": config["method"],
         "task": config["task"],
         "dataset": data["dataset"],
@@ -142,12 +147,22 @@ def build_scientific_config(config):
         "loss": copy.deepcopy(config["loss"]),
         "data": {
             "batch_size": int(data["batch_size"]),
+            "workers": int(data["workers"]),
             "da": data["da"],
         },
+        "source_checkpoint_revision": config.get(
+            "source_checkpoint_revision", SOURCE_CHECKPOINT_REVISION
+        ),
         "variant_policy": copy.deepcopy(VARIANT_METADATA[variant]),
     }
     if variant == "module_lbi":
         lbi = config["lbi"]
+        if lbi is None:
+            scientific_config["lbi"] = {
+                "status": "unresolved",
+                "tuning_granularity": "dataset_method_budget",
+            }
+            return scientific_config
         scientific_config["lbi"] = {
             "alpha": float(lbi["alpha"]),
             "kappa": float(lbi["kappa"]),
@@ -160,7 +175,8 @@ def build_scientific_config(config):
             "delta_nonzero_tolerance": float(
                 lbi["delta_nonzero_tolerance"]
             ),
-            "lbi_initialization": "dense",
+            "support_threshold": float(lbi["support_threshold"]),
+            "lbi_initialization": "masked_delta",
             "stage3_mode": "accumulation",
             "lbi_state_lifecycle": "reset_every_online_step",
         }
@@ -244,736 +260,3 @@ def resolve_experiment_identity(
                 "effective scientific configuration"
             )
     return computed
-
-
-def build_deit_ttda_source_only_identity(config):
-    """Build an identity for the no-adaptation DeiT TTDA control.
-
-    This is intentionally separate from ``build_experiment_identity`` so the
-    legacy FC/SHOT identity remains byte-for-byte stable.
-    """
-    data = config["data"]
-    checkpoint = config["source_checkpoint"]
-    evaluation = config["evaluation"]
-    scientific_config = {
-        "method": "no_tta",
-        "task": "ttda",
-        "protocol": "full_target_dataset_no_adaptation",
-        "variant": "source_only",
-        "dataset": data["dataset"],
-        "source": int(data["source"]),
-        "target": int(data["target"]),
-        "source_name": data["source_name"],
-        "target_name": data["target_name"],
-        "seed": int(config["seed"]),
-        "model": {
-            "name": config["model"]["name"],
-            "implementation": "timm",
-            "non_distilled": True,
-            "head_schema": config["model"]["head_schema"],
-            "drop_rate": 0.0,
-            "drop_path_rate": 0.0,
-        },
-        "source_checkpoint": {
-            "sha256": checkpoint["sha256"],
-            "schema_version": checkpoint["schema_version"],
-            "kind": checkpoint["kind"],
-            "source_training_seed": checkpoint["source_training_seed"],
-        },
-        "target_data": {
-            "list_sha256": data["target_list_sha256"],
-            "class_mapping_sha256": data["class_mapping_sha256"],
-            "sample_count": int(data["target_sample_count"]),
-            "num_classes": int(data["num_classes"]),
-            "order": "sequential",
-            "drop_last": False,
-        },
-        "preprocessing": copy.deepcopy(config["preprocessing"]),
-        "evaluation": {
-            "batch_size": int(evaluation["batch_size"]),
-            "amp": bool(evaluation["amp"]),
-            "deterministic": bool(evaluation["deterministic"]),
-            "prediction_passes": 1,
-        },
-        "metrics": copy.deepcopy(config["metrics"]),
-        "adaptation": {
-            "steps": 0,
-            "optimizer": None,
-            "loss": None,
-            "backward": False,
-            "target_labels_usage": "evaluation_only",
-        },
-    }
-    canonical_json = canonical_scientific_json(scientific_config)
-    full_sha256 = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-    experiment_key = "__".join(
-        [
-            "no_tta",
-            "ttda",
-            data["dataset"],
-            f"s{int(data['source'])}-t{int(data['target'])}",
-            f"seed{int(config['seed'])}",
-            "source_only",
-            full_sha256[:12],
-        ]
-    )
-    return {
-        "experiment_key": experiment_key,
-        "experiment_config_sha256": full_sha256,
-        "scientific_config": scientific_config,
-    }
-
-
-def resolve_deit_ttda_source_only_identity(
-    config,
-    provided_key=None,
-    provided_sha256=None,
-):
-    computed = build_deit_ttda_source_only_identity(config)
-    if (provided_key is None) != (provided_sha256 is None):
-        raise ValueError(
-            "experiment_key and experiment_config_sha256 must be "
-            "provided together"
-        )
-    if provided_key is not None:
-        if provided_key != computed["experiment_key"]:
-            raise ValueError(
-                "Provided experiment_key does not match the effective DeiT "
-                "TTDA source-only configuration"
-            )
-        if provided_sha256 != computed["experiment_config_sha256"]:
-            raise ValueError(
-                "Provided experiment_config_sha256 does not match the "
-                "effective DeiT TTDA source-only configuration"
-            )
-    return computed
-
-
-def build_deit_otta_source_only_identity(config):
-    """Build an identity for the no-adaptation DeiT OTTA control.
-
-    The identity is deliberately separate from both the legacy FC/SHOT
-    identity and the DeiT TTDA identity.  OTTA is a sequential target stream,
-    even though the source-only control performs zero parameter updates.
-    """
-    data = config["data"]
-    checkpoint = config["source_checkpoint"]
-    evaluation = config["evaluation"]
-    scientific_config = {
-        "method": "no_tta",
-        "task": "otta",
-        "protocol": "sequential_target_stream_no_adaptation",
-        "variant": "source_only",
-        "dataset": data["dataset"],
-        "source": int(data["source"]),
-        "target": int(data["target"]),
-        "source_name": data["source_name"],
-        "target_name": data["target_name"],
-        "seed": int(config["seed"]),
-        "model": {
-            "name": config["model"]["name"],
-            "implementation": "timm",
-            "non_distilled": True,
-            "head_schema": config["model"]["head_schema"],
-            "drop_rate": 0.0,
-            "drop_path_rate": 0.0,
-        },
-        "source_checkpoint": {
-            "sha256": checkpoint["sha256"],
-            "schema_version": checkpoint["schema_version"],
-            "kind": checkpoint["kind"],
-            "source_training_seed": checkpoint["source_training_seed"],
-        },
-        "target_stream": {
-            "list_sha256": data["target_list_sha256"],
-            "class_mapping_sha256": data["class_mapping_sha256"],
-            "sample_count": int(data["target_sample_count"]),
-            "num_classes": int(data["num_classes"]),
-            "order": "sequential",
-            "drop_last": False,
-            "tail_batch_size_one_policy": "kept",
-        },
-        "preprocessing": copy.deepcopy(config["preprocessing"]),
-        "evaluation": {
-            "batch_size": int(evaluation["batch_size"]),
-            "amp": bool(evaluation["amp"]),
-            "deterministic": bool(evaluation["deterministic"]),
-            "stream_prediction_passes": 1,
-            "fo_prediction_passes": 1,
-            "final_prediction_policy": "independent_full_target_pass",
-        },
-        "metrics": copy.deepcopy(config["metrics"]),
-        "adaptation": {
-            "steps_per_batch": 0,
-            "optimizer": None,
-            "loss": None,
-            "backward": False,
-            "state_carried_between_batches": True,
-            "target_labels_usage": "evaluation_only",
-        },
-    }
-    canonical_json = canonical_scientific_json(scientific_config)
-    full_sha256 = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-    experiment_key = "__".join(
-        [
-            "no_tta",
-            "otta",
-            data["dataset"],
-            f"s{int(data['source'])}-t{int(data['target'])}",
-            f"seed{int(config['seed'])}",
-            "source_only",
-            full_sha256[:12],
-        ]
-    )
-    return {
-        "experiment_key": experiment_key,
-        "experiment_config_sha256": full_sha256,
-        "scientific_config": scientific_config,
-    }
-
-
-def resolve_deit_otta_source_only_identity(
-    config,
-    provided_key=None,
-    provided_sha256=None,
-):
-    computed = build_deit_otta_source_only_identity(config)
-    if (provided_key is None) != (provided_sha256 is None):
-        raise ValueError(
-            "experiment_key and experiment_config_sha256 must be "
-            "provided together"
-        )
-    if provided_key is not None:
-        if provided_key != computed["experiment_key"]:
-            raise ValueError(
-                "Provided experiment_key does not match the effective DeiT "
-                "OTTA source-only configuration"
-            )
-        if provided_sha256 != computed["experiment_config_sha256"]:
-            raise ValueError(
-                "Provided experiment_config_sha256 does not match the "
-                "effective DeiT OTTA source-only configuration"
-            )
-    return computed
-
-
-ADAPTATION_PROTOCOLS = {
-    "full_dense": "sequential_target_stream_full_dense_adaptation",
-    "candidate_dense": "sequential_target_stream_candidate_dense_adaptation",
-}
-
-
-def build_deit_otta_adaptation_identity(config):
-    """Build an identity for a DeiT OTTA adaptation baseline.
-
-    Supports the ``full_dense`` and ``candidate_dense`` variants.  The SHOT
-    objective plus AdamW updates form a new protocol, so the identity is
-    separate from both the legacy FC identity and the DeiT source-only
-    identity.  Variant, update scope, candidate blocks, optimizer, loss, and
-    adaptation settings are identity-bound: changing any of them produces a
-    different experiment key.
-    """
-    variant = config["variant"]
-    data = config["data"]
-    checkpoint = config["source_checkpoint"]
-    evaluation = config["evaluation"]
-    adaptation = config["adaptation"]
-    candidate_blocks = adaptation.get("candidate_blocks")
-    adaptation_record = {
-        "update_scope": adaptation["update_scope"],
-        "model_mode": adaptation["model_mode"],
-        "steps_per_batch": int(adaptation["steps_per_batch"]),
-        "delta_semantics": "unrestricted_accumulation",
-        "budget": "full",
-        "target_labels_usage": "evaluation_only",
-        "state_carried_between_batches": True,
-    }
-    if variant == "candidate_dense":
-        adaptation_record["candidate_blocks"] = sorted(
-            int(block) for block in candidate_blocks
-        )
-        adaptation_record["candidate_parameter_names"] = sorted(
-            candidate_parameter_names(candidate_blocks)
-        )
-    scientific_config = {
-        "method": "shot",
-        "task": "otta",
-        "protocol": ADAPTATION_PROTOCOLS[variant],
-        "variant": variant,
-        "dataset": data["dataset"],
-        "source": int(data["source"]),
-        "target": int(data["target"]),
-        "source_name": data["source_name"],
-        "target_name": data["target_name"],
-        "seed": int(config["seed"]),
-        "model": {
-            "name": config["model"]["name"],
-            "implementation": "timm",
-            "non_distilled": True,
-            "head_schema": config["model"]["head_schema"],
-            "drop_rate": 0.0,
-            "drop_path_rate": 0.0,
-        },
-        "source_checkpoint": {
-            "sha256": checkpoint["sha256"],
-            "schema_version": checkpoint["schema_version"],
-            "kind": checkpoint["kind"],
-            "source_training_seed": checkpoint["source_training_seed"],
-        },
-        "target_stream": {
-            "list_sha256": data["target_list_sha256"],
-            "class_mapping_sha256": data["class_mapping_sha256"],
-            "sample_count": int(data["target_sample_count"]),
-            "num_classes": int(data["num_classes"]),
-            "order": "sequential",
-            "drop_last": False,
-            "tail_batch_size_one_policy": "kept",
-        },
-        "preprocessing": copy.deepcopy(config["preprocessing"]),
-        "evaluation": {
-            "batch_size": int(evaluation["batch_size"]),
-            "amp": bool(evaluation["amp"]),
-            "deterministic": bool(evaluation["deterministic"]),
-            "stream_prediction_passes": 1,
-            "fo_prediction_passes": 1,
-            "final_prediction_policy": "independent_full_target_pass",
-        },
-        "metrics": copy.deepcopy(config["metrics"]),
-        "adaptation": adaptation_record,
-        "optimization": copy.deepcopy(config["optimization"]),
-        "loss": copy.deepcopy(config["loss"]),
-    }
-    canonical_json = canonical_scientific_json(scientific_config)
-    full_sha256 = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-    experiment_key = "__".join(
-        [
-            "shot",
-            "otta",
-            data["dataset"],
-            f"s{int(data['source'])}-t{int(data['target'])}",
-            f"seed{int(config['seed'])}",
-            variant,
-            full_sha256[:12],
-        ]
-    )
-    return {
-        "experiment_key": experiment_key,
-        "experiment_config_sha256": full_sha256,
-        "scientific_config": scientific_config,
-    }
-
-
-def resolve_deit_otta_adaptation_identity(
-    config,
-    provided_key=None,
-    provided_sha256=None,
-):
-    computed = build_deit_otta_adaptation_identity(config)
-    if (provided_key is None) != (provided_sha256 is None):
-        raise ValueError(
-            "experiment_key and experiment_config_sha256 must be "
-            "provided together"
-        )
-    if provided_key is not None:
-        if provided_key != computed["experiment_key"]:
-            raise ValueError(
-                "Provided experiment_key does not match the effective DeiT "
-                "OTTA adaptation configuration"
-            )
-        if provided_sha256 != computed["experiment_config_sha256"]:
-            raise ValueError(
-                "Provided experiment_config_sha256 does not match the "
-                "effective DeiT OTTA adaptation configuration"
-            )
-    return computed
-
-
-def build_deit_otta_group_random_identity(config):
-    """Build an identity for the DeiT OTTA random structural-group baseline.
-
-    Budget, grouping, candidate blocks, mask count/seeds, and the strict
-    masked delta semantics are identity-bound: changing any of them produces a
-    different experiment key.
-    """
-    variant = config["variant"]
-    data = config["data"]
-    checkpoint = config["source_checkpoint"]
-    evaluation = config["evaluation"]
-    adaptation = config["adaptation"]
-    candidate_blocks = adaptation["candidate_blocks"]
-    adaptation_record = {
-        "update_scope": adaptation["update_scope"],
-        "model_mode": adaptation["model_mode"],
-        "steps_per_batch": int(adaptation["steps_per_batch"]),
-        "delta_semantics": adaptation["delta_semantics"],
-        "grouping": adaptation["grouping"],
-        "selection": "random",
-        "mask_static": True,
-        "mask_refresh_policy": "once_before_adaptation",
-        "ranking_source": "independent_random_group_generator",
-        "budget": float(adaptation["budget"]),
-        "budget_unit": "structural_groups",
-        "num_random_masks": int(adaptation["num_random_masks"]),
-        "mask_seeds": [int(seed) for seed in adaptation["mask_seeds"]],
-        "candidate_blocks": sorted(int(block) for block in candidate_blocks),
-        "candidate_parameter_names": sorted(
-            candidate_parameter_names(candidate_blocks)
-        ),
-        "total_groups": int(adaptation["total_groups"]),
-        "active_groups": int(adaptation["active_groups"]),
-        "target_labels_usage": "evaluation_only",
-        "state_carried_between_batches": True,
-    }
-    scientific_config = {
-        "method": "shot",
-        "task": "otta",
-        "protocol": GROUP_RANDOM_PROTOCOL,
-        "variant": variant,
-        "dataset": data["dataset"],
-        "source": int(data["source"]),
-        "target": int(data["target"]),
-        "source_name": data["source_name"],
-        "target_name": data["target_name"],
-        "seed": int(config["seed"]),
-        "model": {
-            "name": config["model"]["name"],
-            "implementation": "timm",
-            "non_distilled": True,
-            "head_schema": config["model"]["head_schema"],
-            "drop_rate": 0.0,
-            "drop_path_rate": 0.0,
-        },
-        "source_checkpoint": {
-            "sha256": checkpoint["sha256"],
-            "schema_version": checkpoint["schema_version"],
-            "kind": checkpoint["kind"],
-            "source_training_seed": checkpoint["source_training_seed"],
-        },
-        "target_stream": {
-            "list_sha256": data["target_list_sha256"],
-            "class_mapping_sha256": data["class_mapping_sha256"],
-            "sample_count": int(data["target_sample_count"]),
-            "num_classes": int(data["num_classes"]),
-            "order": "sequential",
-            "drop_last": False,
-            "tail_batch_size_one_policy": "kept",
-        },
-        "preprocessing": copy.deepcopy(config["preprocessing"]),
-        "evaluation": {
-            "batch_size": int(evaluation["batch_size"]),
-            "amp": bool(evaluation["amp"]),
-            "deterministic": bool(evaluation["deterministic"]),
-            "stream_prediction_passes": 1,
-            "fo_prediction_passes": 1,
-            "final_prediction_policy": "independent_full_target_pass",
-        },
-        "metrics": copy.deepcopy(config["metrics"]),
-        "adaptation": adaptation_record,
-        "optimization": copy.deepcopy(config["optimization"]),
-        "loss": copy.deepcopy(config["loss"]),
-    }
-    canonical_json = canonical_scientific_json(scientific_config)
-    full_sha256 = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-    experiment_key = "__".join(
-        [
-            "shot",
-            "otta",
-            data["dataset"],
-            f"s{int(data['source'])}-t{int(data['target'])}",
-            f"seed{int(config['seed'])}",
-            "group_random",
-            f"budget{float(adaptation['budget'])}",
-            full_sha256[:12],
-        ]
-    )
-    return {
-        "experiment_key": experiment_key,
-        "experiment_config_sha256": full_sha256,
-        "scientific_config": scientific_config,
-    }
-
-
-def resolve_deit_otta_group_random_identity(
-    config,
-    provided_key=None,
-    provided_sha256=None,
-):
-    computed = build_deit_otta_group_random_identity(config)
-    if (provided_key is None) != (provided_sha256 is None):
-        raise ValueError(
-            "experiment_key and experiment_config_sha256 must be "
-            "provided together"
-        )
-    if provided_key is not None:
-        if provided_key != computed["experiment_key"]:
-            raise ValueError(
-                "Provided experiment_key does not match the effective DeiT "
-                "OTTA group-random configuration"
-            )
-        if provided_sha256 != computed["experiment_config_sha256"]:
-            raise ValueError(
-                "Provided experiment_config_sha256 does not match the "
-                "effective DeiT OTTA group-random configuration"
-            )
-    return computed
-
-
-def build_deit_otta_group_magnitude_identity(config):
-    """Build an identity for the DeiT OTTA magnitude structural-group baseline.
-
-    Budget, grouping, candidate blocks, the W0-based |W|-sum ranking, and the
-    strict masked delta semantics are identity-bound: changing any of them
-    produces a different experiment key.  The selection is deterministic, so
-    there are no mask seeds.
-    """
-    variant = config["variant"]
-    data = config["data"]
-    checkpoint = config["source_checkpoint"]
-    evaluation = config["evaluation"]
-    adaptation = config["adaptation"]
-    candidate_blocks = adaptation["candidate_blocks"]
-    adaptation_record = {
-        "update_scope": adaptation["update_scope"],
-        "model_mode": adaptation["model_mode"],
-        "steps_per_batch": int(adaptation["steps_per_batch"]),
-        "delta_semantics": adaptation["delta_semantics"],
-        "grouping": adaptation["grouping"],
-        "selection": "magnitude",
-        "group_score": adaptation["group_score"],
-        "mask_static": True,
-        "mask_refresh_policy": "once_before_adaptation",
-        "ranking_source": "source_checkpoint_pre_adaptation",
-        "budget": float(adaptation["budget"]),
-        "budget_unit": "structural_groups",
-        "candidate_blocks": sorted(int(block) for block in candidate_blocks),
-        "candidate_parameter_names": sorted(
-            candidate_parameter_names(candidate_blocks)
-        ),
-        "total_groups": int(adaptation["total_groups"]),
-        "active_groups": int(adaptation["active_groups"]),
-        "target_labels_usage": "evaluation_only",
-        "state_carried_between_batches": True,
-    }
-    scientific_config = {
-        "method": "shot",
-        "task": "otta",
-        "protocol": GROUP_MAGNITUDE_PROTOCOL,
-        "variant": variant,
-        "dataset": data["dataset"],
-        "source": int(data["source"]),
-        "target": int(data["target"]),
-        "source_name": data["source_name"],
-        "target_name": data["target_name"],
-        "seed": int(config["seed"]),
-        "model": {
-            "name": config["model"]["name"],
-            "implementation": "timm",
-            "non_distilled": True,
-            "head_schema": config["model"]["head_schema"],
-            "drop_rate": 0.0,
-            "drop_path_rate": 0.0,
-        },
-        "source_checkpoint": {
-            "sha256": checkpoint["sha256"],
-            "schema_version": checkpoint["schema_version"],
-            "kind": checkpoint["kind"],
-            "source_training_seed": checkpoint["source_training_seed"],
-        },
-        "target_stream": {
-            "list_sha256": data["target_list_sha256"],
-            "class_mapping_sha256": data["class_mapping_sha256"],
-            "sample_count": int(data["target_sample_count"]),
-            "num_classes": int(data["num_classes"]),
-            "order": "sequential",
-            "drop_last": False,
-            "tail_batch_size_one_policy": "kept",
-        },
-        "preprocessing": copy.deepcopy(config["preprocessing"]),
-        "evaluation": {
-            "batch_size": int(evaluation["batch_size"]),
-            "amp": bool(evaluation["amp"]),
-            "deterministic": bool(evaluation["deterministic"]),
-            "stream_prediction_passes": 1,
-            "fo_prediction_passes": 1,
-            "final_prediction_policy": "independent_full_target_pass",
-        },
-        "metrics": copy.deepcopy(config["metrics"]),
-        "adaptation": adaptation_record,
-        "optimization": copy.deepcopy(config["optimization"]),
-        "loss": copy.deepcopy(config["loss"]),
-    }
-    canonical_json = canonical_scientific_json(scientific_config)
-    full_sha256 = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-    experiment_key = "__".join(
-        [
-            "shot",
-            "otta",
-            data["dataset"],
-            f"s{int(data['source'])}-t{int(data['target'])}",
-            f"seed{int(config['seed'])}",
-            "group_magnitude",
-            f"budget{float(adaptation['budget'])}",
-            full_sha256[:12],
-        ]
-    )
-    return {
-        "experiment_key": experiment_key,
-        "experiment_config_sha256": full_sha256,
-        "scientific_config": scientific_config,
-    }
-
-
-def resolve_deit_otta_group_magnitude_identity(
-    config,
-    provided_key=None,
-    provided_sha256=None,
-):
-    computed = build_deit_otta_group_magnitude_identity(config)
-    if (provided_key is None) != (provided_sha256 is None):
-        raise ValueError(
-            "experiment_key and experiment_config_sha256 must be "
-            "provided together"
-        )
-    if provided_key is not None:
-        if provided_key != computed["experiment_key"]:
-            raise ValueError(
-                "Provided experiment_key does not match the effective DeiT "
-                "OTTA group-magnitude configuration"
-            )
-        if provided_sha256 != computed["experiment_config_sha256"]:
-            raise ValueError(
-                "Provided experiment_config_sha256 does not match the "
-                "effective DeiT OTTA group-magnitude configuration"
-            )
-    return computed
-
-
-def build_deit_otta_group_saliency_identity(config):
-    """Build an identity for the DeiT OTTA saliency structural-group baseline.
-
-    Budget, grouping, candidate blocks, the gradient-L2-norm saliency score,
-    the per-step mask refresh policy, and the accumulation delta semantics are
-    identity-bound: changing any of them produces a different experiment key.
-    The mask is refreshed every online step, so there are no static mask seeds.
-    """
-    variant = config["variant"]
-    data = config["data"]
-    checkpoint = config["source_checkpoint"]
-    evaluation = config["evaluation"]
-    adaptation = config["adaptation"]
-    candidate_blocks = adaptation["candidate_blocks"]
-    adaptation_record = {
-        "update_scope": adaptation["update_scope"],
-        "model_mode": adaptation["model_mode"],
-        "steps_per_batch": int(adaptation["steps_per_batch"]),
-        "delta_semantics": adaptation["delta_semantics"],
-        "grouping": adaptation["grouping"],
-        "selection": "saliency",
-        "saliency_score": adaptation["saliency_score"],
-        "mask_static": False,
-        "mask_refresh_policy": "every_online_step_after_backward",
-        "ranking_source": "current_gradient_after_backward",
-        "budget": float(adaptation["budget"]),
-        "budget_unit": "structural_groups",
-        "candidate_blocks": sorted(int(block) for block in candidate_blocks),
-        "candidate_parameter_names": sorted(
-            candidate_parameter_names(candidate_blocks)
-        ),
-        "total_groups": int(adaptation["total_groups"]),
-        "active_groups": int(adaptation["active_groups"]),
-        "target_labels_usage": "evaluation_only",
-        "state_carried_between_batches": True,
-    }
-    scientific_config = {
-        "method": "shot",
-        "task": "otta",
-        "protocol": GROUP_SALIENCY_PROTOCOL,
-        "variant": variant,
-        "dataset": data["dataset"],
-        "source": int(data["source"]),
-        "target": int(data["target"]),
-        "source_name": data["source_name"],
-        "target_name": data["target_name"],
-        "seed": int(config["seed"]),
-        "model": {
-            "name": config["model"]["name"],
-            "implementation": "timm",
-            "non_distilled": True,
-            "head_schema": config["model"]["head_schema"],
-            "drop_rate": 0.0,
-            "drop_path_rate": 0.0,
-        },
-        "source_checkpoint": {
-            "sha256": checkpoint["sha256"],
-            "schema_version": checkpoint["schema_version"],
-            "kind": checkpoint["kind"],
-            "source_training_seed": checkpoint["source_training_seed"],
-        },
-        "target_stream": {
-            "list_sha256": data["target_list_sha256"],
-            "class_mapping_sha256": data["class_mapping_sha256"],
-            "sample_count": int(data["target_sample_count"]),
-            "num_classes": int(data["num_classes"]),
-            "order": "sequential",
-            "drop_last": False,
-            "tail_batch_size_one_policy": "kept",
-        },
-        "preprocessing": copy.deepcopy(config["preprocessing"]),
-        "evaluation": {
-            "batch_size": int(evaluation["batch_size"]),
-            "amp": bool(evaluation["amp"]),
-            "deterministic": bool(evaluation["deterministic"]),
-            "stream_prediction_passes": 1,
-            "fo_prediction_passes": 1,
-            "final_prediction_policy": "independent_full_target_pass",
-        },
-        "metrics": copy.deepcopy(config["metrics"]),
-        "adaptation": adaptation_record,
-        "optimization": copy.deepcopy(config["optimization"]),
-        "loss": copy.deepcopy(config["loss"]),
-    }
-    canonical_json = canonical_scientific_json(scientific_config)
-    full_sha256 = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-    experiment_key = "__".join(
-        [
-            "shot",
-            "otta",
-            data["dataset"],
-            f"s{int(data['source'])}-t{int(data['target'])}",
-            f"seed{int(config['seed'])}",
-            "group_saliency",
-            f"budget{float(adaptation['budget'])}",
-            full_sha256[:12],
-        ]
-    )
-    return {
-        "experiment_key": experiment_key,
-        "experiment_config_sha256": full_sha256,
-        "scientific_config": scientific_config,
-    }
-
-
-def resolve_deit_otta_group_saliency_identity(
-    config,
-    provided_key=None,
-    provided_sha256=None,
-):
-    computed = build_deit_otta_group_saliency_identity(config)
-    if (provided_key is None) != (provided_sha256 is None):
-        raise ValueError(
-            "experiment_key and experiment_config_sha256 must be "
-            "provided together"
-        )
-    if provided_key is not None:
-        if provided_key != computed["experiment_key"]:
-            raise ValueError(
-                "Provided experiment_key does not match the effective DeiT "
-                "OTTA group-saliency configuration"
-            )
-        if provided_sha256 != computed["experiment_config_sha256"]:
-            raise ValueError(
-                "Provided experiment_config_sha256 does not match the "
-                "effective DeiT OTTA group-saliency configuration"
-            )
-    return computed
-

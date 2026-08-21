@@ -17,6 +17,7 @@ if PROJECT_DIR not in sys.path:
 from core.lbi import (  # noqa: E402
     compute_lbi_run_budget_diagnostics,
     compute_lbi_step_budget_diagnostics,
+    max_support_count,
     target_support_count,
 )
 from tools.summarize_runs import (  # noqa: E402
@@ -29,7 +30,7 @@ from tools.summarize_runs import (  # noqa: E402
 
 def _step(
     support,
-    reason="rollback_feasible",
+    reason="budget_reached",
     requested_budget=0.1,
     candidate_count=100,
     stage1_steps=12,
@@ -42,7 +43,7 @@ def _step(
         "stage1_support_ratio": support / candidate_count,
         "stage1_steps_completed": stage1_steps,
         "stage1_stop_reason": reason,
-        "stage1_rollback_used": reason == "rollback_feasible",
+        "stage1_rollback_used": reason == "strict_budget_rollback",
     }
 
 
@@ -56,7 +57,7 @@ def _check_run_diagnostics():
     assert all_hit["max_steps_hit_count"] == 0
     assert all_hit["valid_lbi_run"] is True
     assert all_hit["stage1_stop_reason_counts"][
-        "rollback_feasible"
+        "budget_reached"
     ] == 8
     assert all_hit["stage1_stop_reason_counts"]["max_steps"] == 0
 
@@ -73,7 +74,7 @@ def _check_run_diagnostics():
     max_steps = compute_lbi_run_budget_diagnostics(
         [_step(10), _step(10, reason="max_steps")]
     )
-    assert max_steps["budget_hit_count"] == 2
+    assert max_steps["budget_hit_count"] == 1
     assert max_steps["max_steps_hit_count"] == 1
     assert max_steps["valid_lbi_step_count"] == 1
     assert max_steps["valid_lbi_run"] is False
@@ -92,12 +93,30 @@ def _check_run_diagnostics():
     rollback_underfilled = compute_lbi_step_budget_diagnostics(
         0.1, 100, 9, "rollback_feasible"
     )
-    assert rollback_hit["budget_reached"] is True
+    assert rollback_hit["budget_reached"] is False
+    assert rollback_hit["strict_budget_boundary_stop"] is True
     assert rollback_hit["valid_lbi_step"] is True
     assert rollback_underfilled["budget_reached"] is False
     assert rollback_underfilled["valid_lbi_step"] is False
 
-    assert target_support_count(0.002, 524544) == 1050
+    rollback = compute_lbi_step_budget_diagnostics(
+        0.1, 100, 9, "strict_budget_rollback"
+    )
+    assert rollback["budget_reached"] is False
+    assert rollback["strict_budget_boundary_stop"] is True
+    assert rollback["valid_lbi_step"] is True
+
+    rollback_run = compute_lbi_run_budget_diagnostics(
+        [_step(9, reason="strict_budget_rollback") for _ in range(2)]
+    )
+    assert rollback_run["budget_reached_all_steps"] is True
+    assert rollback_run["exact_budget_reached_all_steps"] is False
+    assert rollback_run["valid_lbi_run"] is True
+
+    assert max_support_count(0.0005, 524544) == 262
+    assert max_support_count(0.001, 524544) == 524
+    assert max_support_count(0.002, 524544) == 1049
+    assert target_support_count(0.002, 524544) == 1049
 
 
 def _summary_payload(key, seed, diagnostics=None):

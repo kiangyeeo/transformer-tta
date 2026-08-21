@@ -19,8 +19,15 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from experiment_identity import (  # noqa: E402
+    IMPLEMENTATION_REVISION,
     SUPPORTED_VARIANTS,
     build_experiment_identity,
+)
+from protocol_constants import (  # noqa: E402
+    EFFICIENCY_PROTOCOL_REVISION,
+    FORMAL_SEED,
+    PROTOCOL_REVISION,
+    SOURCE_CHECKPOINT_REVISION,
 )
 from shot_otta.config import (  # noqa: E402
     DATASETS,
@@ -58,6 +65,7 @@ LBI_CONFIG_FIELDS = (
     "stage2_lr",
     "stage2_steps",
     "delta_nonzero_tolerance",
+    "support_threshold",
 )
 
 ACTIVE_VISDA_BATCH_PATH = osp.join(
@@ -81,8 +89,8 @@ def _active_visda_batch_size():
 def _validate_visda_batch_size(matrix):
     if "VISDA-C" not in matrix.get("datasets", {}):
         return
-    expected = _active_visda_batch_size()
-    actual = matrix.get("common_training", {}).get("batch_size")
+    expected = 256
+    actual = matrix.get("common_training", {}).get("batch_size", expected)
     if int(actual) != expected:
         raise ValueError(
             "VISDA-C matrix batch_size does not match the active frozen "
@@ -196,6 +204,49 @@ def _normalize_lbi_trials(spec):
     return normalized_trials
 
 
+def _normalize_lbi_budget_trials(spec):
+    """Validate explicitly paired requested-budget / LBI trial entries."""
+    trials = spec["lbi_budget_trials"]
+    if not isinstance(trials, list) or not trials:
+        raise ValueError(
+            "module_lbi lbi_budget_trials must be a non-empty list"
+        )
+    normalized_trials = []
+    seen = set()
+    for index, trial in enumerate(trials):
+        if not isinstance(trial, dict):
+            raise ValueError(
+                f"LBI budget trial at index {index} must be a mapping"
+            )
+        if "budget" not in trial:
+            raise ValueError(
+                f"LBI budget trial at index {index} must define budget"
+            )
+        budget = float(trial["budget"])
+        if not 0.0 <= budget <= 1.0:
+            raise ValueError(
+                f"LBI budget trial at index {index} has invalid budget: "
+                f"{budget}"
+            )
+        lbi = copy.deepcopy(trial)
+        del lbi["budget"]
+        try:
+            validate_lbi_config(lbi)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"Invalid LBI budget trial at index {index}: {error}"
+            ) from error
+        comparable = (budget,) + tuple(lbi[field] for field in LBI_CONFIG_FIELDS)
+        if comparable in seen:
+            raise ValueError(
+                "Duplicate LBI budget trial configuration at index "
+                f"{index}"
+            )
+        seen.add(comparable)
+        normalized_trials.append((budget, lbi))
+    spec["_normalized_lbi_budget_trials"] = normalized_trials
+
+
 def _validate_variant_specs(variants):
     if not isinstance(variants, dict) or not variants:
         raise ValueError("variants must be a non-empty mapping")
@@ -227,19 +278,53 @@ def _validate_variant_specs(variants):
                     f"{variant} must not define selection_seed_mode"
                 )
             continue
-        budgets = spec.get("budgets")
-        if not isinstance(budgets, list) or not budgets:
-            raise ValueError(
-                f"{variant} requires a non-empty budgets list"
-            )
-        normalized_budgets = [float(value) for value in budgets]
-        for budget in normalized_budgets:
-            if not 0.0 <= budget <= 1.0:
+        if variant == "module_lbi" and spec.get("lbi_tuned") == "unresolved":
+            conflicting = [
+                key for key in ("lbi", "lbi_trials", "lbi_budget_trials")
+                if key in spec
+            ]
+            if conflicting:
                 raise ValueError(
-                    f"{variant} budget must be in [0, 1]: {budget}"
+                    "unresolved module_lbi cannot define "
+                    f"{', '.join(conflicting)}"
                 )
-        _require_unique(normalized_budgets, f"budget in {variant}")
-        spec["budgets"] = normalized_budgets
+            budgets = spec.get("budgets")
+            if not isinstance(budgets, list) or not budgets:
+                raise ValueError(
+                    "unresolved module_lbi requires a non-empty budgets list"
+                )
+            spec["budgets"] = [float(value) for value in budgets]
+            _require_unique(spec["budgets"], "budget in module_lbi")
+            spec["_unresolved_lbi"] = True
+            continue
+        paired_lbi_trials = (
+            variant == "module_lbi" and "lbi_budget_trials" in spec
+        )
+        if paired_lbi_trials:
+            conflicting = [
+                key for key in ("budgets", "lbi", "lbi_trials")
+                if key in spec
+            ]
+            if conflicting:
+                raise ValueError(
+                    "module_lbi lbi_budget_trials must not be combined "
+                    f"with {', '.join(conflicting)}"
+                )
+            _normalize_lbi_budget_trials(spec)
+        else:
+            budgets = spec.get("budgets")
+            if not isinstance(budgets, list) or not budgets:
+                raise ValueError(
+                    f"{variant} requires a non-empty budgets list"
+                )
+            normalized_budgets = [float(value) for value in budgets]
+            for budget in normalized_budgets:
+                if not 0.0 <= budget <= 1.0:
+                    raise ValueError(
+                        f"{variant} budget must be in [0, 1]: {budget}"
+                    )
+            _require_unique(normalized_budgets, f"budget in {variant}")
+            spec["budgets"] = normalized_budgets
         if variant == "module_random":
             mode = spec.get("selection_seed_mode")
             if mode != "same_as_run_seed":
@@ -261,7 +346,7 @@ def _validate_variant_specs(variants):
             raise ValueError(
                 f"{variant} must not define selection_seed_mode"
             )
-        if variant == "module_lbi":
+        if variant == "module_lbi" and not paired_lbi_trials:
             spec["_normalized_lbi_trials"] = (
                 _normalize_lbi_trials(spec)
             )
@@ -272,6 +357,11 @@ def validate_matrix(matrix):
         raise ValueError("Matrix currently supports method=shot only")
     if matrix.get("task") != "otta":
         raise ValueError("Matrix currently supports task=otta only")
+    if matrix.get("formal_protocol"):
+        if matrix.get("protocol_revision") != PROTOCOL_REVISION:
+            raise ValueError("formal matrix protocol_revision is not current")
+        if matrix.get("seeds") != [FORMAL_SEED]:
+            raise ValueError(f"formal matrix requires seeds=[{FORMAL_SEED}]")
     seeds = matrix.get("seeds")
     if not isinstance(seeds, list) or not seeds:
         raise ValueError("seeds must be a non-empty list")
@@ -322,6 +412,18 @@ def _variant_points(variant, spec, seed):
             for budget in spec["budgets"]
         ]
     if variant == "module_lbi":
+        if spec.get("_unresolved_lbi"):
+            return [
+                (budget, None, None, None, None)
+                for budget in spec["budgets"]
+            ]
+        if "_normalized_lbi_budget_trials" in spec:
+            return [
+                (budget, None, None, lbi, trial_index)
+                for trial_index, (budget, lbi) in enumerate(
+                    spec["_normalized_lbi_budget_trials"]
+                )
+            ]
         return [
             (budget, None, None, lbi, trial_index)
             for budget in spec["budgets"]
@@ -355,6 +457,7 @@ def _apply_plan_config(
     effective["variant"] = variant
     effective["requested_budget"] = requested_budget
     effective["selection_seed"] = selection_seed
+    effective["allow_unresolved_lbi"] = lbi is None
     if variant == "module_random":
         effective["num_random_masks"] = num_random_masks
     if variant == "module_lbi":
@@ -449,8 +552,9 @@ def _command_arguments(
         )
     if overrides["variant"] == "module_lbi":
         lbi = overrides["lbi"]
-        arguments.extend(
-            [
+        if lbi is not None:
+            arguments.extend(
+                [
                 "--lbi-alpha",
                 str(lbi["alpha"]),
                 "--lbi-kappa",
@@ -469,8 +573,10 @@ def _command_arguments(
                 str(lbi["stage2_steps"]),
                 "--lbi-delta-nonzero-tolerance",
                 str(lbi["delta_nonzero_tolerance"]),
-            ]
-        )
+                "--lbi-support-threshold",
+                str(lbi["support_threshold"]),
+                ]
+            )
     if overrides["variant"] == "module_random":
         arguments.extend(
             [
@@ -553,8 +659,24 @@ def build_plan(matrix, base_config, base_config_path):
                             overrides,
                             identity,
                         )
+                        lbi_resolved = (
+                            variant != "module_lbi" or effective.get("lbi") is not None
+                        )
+                        lbi_config = effective.get("lbi") or {}
                         entries.append(
                             {
+                                "implementation_revision": (
+                                    IMPLEMENTATION_REVISION
+                                ),
+                                "protocol_revision": matrix.get(
+                                    "protocol_revision", PROTOCOL_REVISION
+                                ),
+                                "efficiency_protocol_revision": (
+                                    EFFICIENCY_PROTOCOL_REVISION
+                                ),
+                                "source_checkpoint_revision": (
+                                    SOURCE_CHECKPOINT_REVISION
+                                ),
                                 "experiment_key": identity[
                                     "experiment_key"
                                 ],
@@ -578,55 +700,55 @@ def build_plan(matrix, base_config, base_config_path):
                                 ),
                                 "num_random_masks": num_random_masks,
                                 "lbi_trial_index": lbi_trial_index,
+                                "lbi_resolved": lbi_resolved,
+                                "unresolved_lbi_reason": (
+                                    "six dataset×budget SHOT tuned tuples are TBD"
+                                    if not lbi_resolved
+                                    else None
+                                ),
                                 "alpha": (
-                                    effective["lbi"]["alpha"]
-                                    if variant == "module_lbi"
+                                    lbi_config.get("alpha")
+                                    if lbi_resolved and variant == "module_lbi"
                                     else None
                                 ),
                                 "kappa": (
-                                    effective["lbi"]["kappa"]
-                                    if variant == "module_lbi"
+                                    lbi_config.get("kappa")
+                                    if lbi_resolved and variant == "module_lbi"
                                     else None
                                 ),
                                 "nu": (
-                                    effective["lbi"]["nu"]
-                                    if variant == "module_lbi"
+                                    lbi_config.get("nu")
+                                    if lbi_resolved and variant == "module_lbi"
                                     else None
                                 ),
                                 "omega": (
-                                    effective["lbi"]["omega"]
-                                    if variant == "module_lbi"
+                                    lbi_config.get("omega")
+                                    if lbi_resolved and variant == "module_lbi"
                                     else None
                                 ),
                                 "stage1_max_steps": (
-                                    effective["lbi"][
-                                        "stage1_max_steps"
-                                    ]
-                                    if variant == "module_lbi"
+                                    lbi_config.get("stage1_max_steps")
+                                    if lbi_resolved and variant == "module_lbi"
                                     else None
                                 ),
                                 "budget_tolerance": (
-                                    effective["lbi"][
-                                        "budget_tolerance"
-                                    ]
-                                    if variant == "module_lbi"
+                                    lbi_config.get("budget_tolerance")
+                                    if lbi_resolved and variant == "module_lbi"
                                     else None
                                 ),
                                 "stage2_lr": (
-                                    effective["lbi"]["stage2_lr"]
-                                    if variant == "module_lbi"
+                                    lbi_config.get("stage2_lr")
+                                    if lbi_resolved and variant == "module_lbi"
                                     else None
                                 ),
                                 "stage2_steps_requested": (
-                                    effective["lbi"]["stage2_steps"]
-                                    if variant == "module_lbi"
+                                    lbi_config.get("stage2_steps")
+                                    if lbi_resolved and variant == "module_lbi"
                                     else None
                                 ),
                                 "delta_nonzero_tolerance": (
-                                    effective["lbi"][
-                                        "delta_nonzero_tolerance"
-                                    ]
-                                    if variant == "module_lbi"
+                                    lbi_config.get("delta_nonzero_tolerance")
+                                    if lbi_resolved and variant == "module_lbi"
                                     else None
                                 ),
                                 "effective_overrides": overrides,
@@ -639,6 +761,10 @@ def build_plan(matrix, base_config, base_config_path):
     _validate_unique_identities(entries)
     plan = {
         "plan_schema_version": 1,
+        "protocol_revision": matrix.get("protocol_revision", PROTOCOL_REVISION),
+        "implementation_revision": IMPLEMENTATION_REVISION,
+        "efficiency_protocol_revision": EFFICIENCY_PROTOCOL_REVISION,
+        "source_checkpoint_revision": SOURCE_CHECKPOINT_REVISION,
         "method": matrix["method"],
         "task": matrix["task"],
         "matrix_path": None,
@@ -647,7 +773,21 @@ def build_plan(matrix, base_config, base_config_path):
         "experiments": entries,
     }
     if "VISDA-C" in matrix["datasets"]:
-        plan["batch_size"] = int(matrix["common_training"]["batch_size"])
+        plan["batch_size"] = 256
+    plan["formal_matrix_summary"] = {
+        "dataset_counts": {
+            dataset: sum(1 for entry in entries if entry["dataset"] == dataset)
+            for dataset in transfers_by_dataset
+        },
+        "variant_counts": {
+            variant: sum(1 for entry in entries if entry["variant"] == variant)
+            for variant in SUPPORTED_VARIANTS
+        },
+        "unresolved_lbi_count": sum(
+            1 for entry in entries
+            if entry["variant"] == "module_lbi" and not entry["lbi_resolved"]
+        ),
+    }
     return plan
 
 
@@ -706,6 +846,7 @@ def main():
                 {
                     "valid": True,
                     "experiment_count": plan["experiment_count"],
+                    **plan.get("formal_matrix_summary", {}),
                 },
                 ensure_ascii=False,
             )

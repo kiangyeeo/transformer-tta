@@ -6,6 +6,7 @@ from .diagnostics import (
     STEP_BUDGET_DIAGNOSTIC_FIELDS,
     compute_lbi_run_budget_diagnostics,
     compute_lbi_step_budget_diagnostics,
+    max_support_count,
     target_support_count,
     unavailable_lbi_budget_diagnostics,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "SplitLBIEngine",
     "compute_lbi_run_budget_diagnostics",
     "compute_lbi_step_budget_diagnostics",
+    "max_support_count",
     "target_support_count",
     "unavailable_lbi_budget_diagnostics",
 ]

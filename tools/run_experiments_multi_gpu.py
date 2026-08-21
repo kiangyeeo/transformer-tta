@@ -60,9 +60,27 @@ def find_stream_resume_dir(runs_root, experiment):
             continue
         candidates.append((int(metadata.get('loader_batches_processed', -1)), metadata_path.stat().st_mtime, str(metadata_path.parent.parent.resolve())))
     return max(candidates)[2] if candidates else None
-def command_for_experiment(experiment, gpu, resume_run_dir=None, enable_stream_checkpoint=False):
+
+
+def checkpoint_eligible(experiment):
+    """Only LBI has the protocol's completed-batch stream checkpoint."""
+    return experiment.get('variant') == 'module_lbi'
+
+
+def command_for_experiment(experiment, gpu, resume_run_dir=None, enable_stream_checkpoint=False, workers_per_gpu=None):
+    eligible = checkpoint_eligible(experiment)
+    if resume_run_dir and not eligible:
+        raise ValueError(
+            'stream checkpoint/resume is only allowed for module_lbi'
+        )
     command = replace_gpu(experiment['command_args'], gpu)
-    if enable_stream_checkpoint:
+    if workers_per_gpu is not None:
+        gpu_flag_index = command.index('--gpu-id')
+        protocol_args = ['--workers-per-gpu', str(workers_per_gpu)]
+        if workers_per_gpu == 1:
+            protocol_args.append('--runtime-comparable')
+        command[gpu_flag_index:gpu_flag_index] = protocol_args
+    if enable_stream_checkpoint and eligible:
         command.append('--enable-stream-checkpoint')
     if resume_run_dir:
         command.extend(['--resume-run-dir', resume_run_dir])
@@ -70,6 +88,32 @@ def command_for_experiment(experiment, gpu, resume_run_dir=None, enable_stream_c
 def status_map(plan, runs_root):
     value = check_status(plan, str(runs_root))
     return {x['experiment_key']: x for x in value['experiments']}, value
+
+
+def validate_expected_output_roots(plan, runs_root):
+    """Fail before execution if planned outputs escape the launcher root."""
+    runs_root = Path(runs_root).resolve()
+    mismatches = []
+    for experiment in plan.get('experiments', []):
+        expected = experiment.get('expected_output_root')
+        if not isinstance(expected, str) or not expected:
+            mismatches.append((experiment.get('experiment_key'), expected))
+            continue
+        expected_path = Path(expected).resolve()
+        try:
+            expected_path.relative_to(runs_root)
+        except ValueError:
+            mismatches.append((experiment.get('experiment_key'), expected))
+    if mismatches:
+        details = '; '.join(
+            f'{key}: {expected!r}' for key, expected in mismatches[:5]
+        )
+        if len(mismatches) > 5:
+            details += f'; ... ({len(mismatches) - 5} more)'
+        raise RuntimeError(
+            f'plan expected_output_root is outside --runs-root '
+            f'{runs_root}: {details}'
+        )
 
 
 def validate_visda_batch_size(plan):
@@ -80,13 +124,7 @@ def validate_visda_batch_size(plan):
     ]
     if not entries:
         return
-    frozen_path = PROJECT_DIR / 'experiment_logs' / 'CURRENT_VISDA_BATCH_SIZE.txt'
-    try:
-        frozen = int(frozen_path.read_text(encoding='utf-8').strip())
-    except (OSError, TypeError, ValueError) as error:
-        raise RuntimeError(
-            f'VISDA-C launcher requires a valid frozen batch size at {frozen_path}'
-        ) from error
+    frozen = 256
     observed = {
         int(experiment['scientific_config']['data']['batch_size'])
         for experiment in entries
@@ -126,11 +164,18 @@ def signal_handler(signum, _frame):
 def execute(plan, runs_root, logs_root, gpus, workdir, dry_run=False, summarize_after_run=False, command_history=None, process_executor=None, workers_per_gpu=1, max_workers=None, resume_partial_runs=False):
     """Run plan; process_executor is intentionally injectable for CPU smoke tests."""
     if workers_per_gpu < 1: raise ValueError('workers_per_gpu must be positive')
-    if resume_partial_runs and plan.get('supports_stream_resume') is False:
-        raise ValueError('This plan does not support --resume-partial-runs')
-    if summarize_after_run and plan.get('supports_generic_summary') is False:
-        raise ValueError('This plan requires its task-specific summary tool; do not use --summarize-after-run')
+    validate_expected_output_roots(plan, runs_root)
     validate_visda_batch_size(plan)
+    unresolved = [
+        experiment for experiment in plan.get('experiments', [])
+        if experiment.get('variant') == 'module_lbi'
+        and experiment.get('lbi_resolved') is False
+    ]
+    if unresolved and not dry_run:
+        raise RuntimeError(
+            'formal module_lbi execution blocked: unresolved tuned tuple '
+            f"for {len(unresolved)} plan identities"
+        )
     process_executor = process_executor or default_executor
     slots=[(gpu, index) for gpu in gpus for index in range(workers_per_gpu)]; slots=slots[:min(len(slots), max_workers if max_workers is not None else len(slots))]
     logs_root = Path(logs_root); logs_root.mkdir(parents=True, exist_ok=True)
@@ -141,7 +186,7 @@ def execute(plan, runs_root, logs_root, gpus, workdir, dry_run=False, summarize_
         raise RuntimeError('preflight status contains invalid, duplicate, or hash-mismatched summaries')
     todo = [e for e in plan['experiments'] if smap[e['experiment_key']]['plan_status'] == 'missing']
     if dry_run:
-        report={'gpus':gpus,'workers_per_gpu':workers_per_gpu,'slot_count':len(slots),'completed':[e['experiment_key'] for e in plan['experiments'] if e not in todo], 'will_execute':[{'experiment_key':e['experiment_key'],'assigned_gpu':slots[i%len(slots)][0],'gpu_slot_index':slots[i%len(slots)][1],'resume_run_dir':find_stream_resume_dir(runs_root,e) if resume_partial_runs else None,'actual_command':command_for_experiment(e,slots[i%len(slots)][0],find_stream_resume_dir(runs_root,e) if resume_partial_runs else None,enable_stream_checkpoint=resume_partial_runs)} for i,e in enumerate(todo)]}
+        report={'gpus':gpus,'workers_per_gpu':workers_per_gpu,'slot_count':len(slots),'completed':[e['experiment_key'] for e in plan['experiments'] if e not in todo], 'will_execute':[{'experiment_key':e['experiment_key'],'assigned_gpu':slots[i%len(slots)][0],'gpu_slot_index':slots[i%len(slots)][1],'resume_run_dir':find_stream_resume_dir(runs_root,e) if resume_partial_runs and checkpoint_eligible(e) else None,'actual_command':command_for_experiment(e,slots[i%len(slots)][0],find_stream_resume_dir(runs_root,e) if resume_partial_runs and checkpoint_eligible(e) else None,enable_stream_checkpoint=resume_partial_runs,workers_per_gpu=workers_per_gpu)} for i,e in enumerate(todo)]}
         print(json.dumps(report, indent=2)); return {'records':[], 'dry_run':True, 'report':report}
     records=[]; records_lock=threading.Lock(); halt=threading.Event()
     def worker(slot):
@@ -150,15 +195,15 @@ def execute(plan, runs_root, logs_root, gpus, workdir, dry_run=False, summarize_
             with queue_lock:
                 if not queue: return
                 exp=queue.pop(0)
-            resume_run_dir = find_stream_resume_dir(runs_root, exp) if resume_partial_runs else None
-            command=command_for_experiment(exp,gpu,resume_run_dir,enable_stream_checkpoint=resume_partial_runs); attempt=0
+            resume_run_dir = find_stream_resume_dir(runs_root, exp) if resume_partial_runs and checkpoint_eligible(exp) else None
+            command=command_for_experiment(exp,gpu,resume_run_dir,enable_stream_checkpoint=resume_partial_runs,workers_per_gpu=workers_per_gpu); attempt=0
             while attempt < 2 and not _STOP.is_set():
                 attempt += 1; started=now(); timer=time.perf_counter()
                 adir=logs_root/safe(exp['experiment_key'])/(datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')+f'_gpu{gpu}_try{attempt}')
                 adir.mkdir(parents=True); out,err=adir/'stdout.log',adir/'stderr.log'
                 append_history(command_history, command, workdir)
                 attempt_state={'directory':adir,'experiment_key':exp['experiment_key'],'pid':None}
-                write_json(adir/'attempt_started.json', {'experiment_key':exp['experiment_key'],'experiment_config_sha256':exp['experiment_config_sha256'],'assigned_gpu':gpu,'gpu_slot_index':gpu_slot_index,'started_at_utc':started,'resume_run_dir':resume_run_dir,'actual_command':command,'command_display':shlex.join(command),'stdout_log':str(out.resolve()),'stderr_log':str(err.resolve())})
+                write_json(adir/'attempt_started.json', {'implementation_revision':exp.get('implementation_revision'),'experiment_key':exp['experiment_key'],'experiment_config_sha256':exp['experiment_config_sha256'],'assigned_gpu':gpu,'gpu_slot_index':gpu_slot_index,'started_at_utc':started,'resume_run_dir':resume_run_dir,'actual_command':command,'command_display':shlex.join(command),'stdout_log':str(out.resolve()),'stderr_log':str(err.resolve())})
                 with _ATTEMPT_LOCK: _ACTIVE_ATTEMPTS[str(adir)] = attempt_state
                 executor_exception = None
                 try:
@@ -171,7 +216,7 @@ def execute(plan, runs_root, logs_root, gpus, workdir, dry_run=False, summarize_
                 finally:
                     with _ATTEMPT_LOCK: _ACTIVE_ATTEMPTS.pop(str(adir),None)
                 post,_=status_map(plan,runs_root)
-                row={'experiment_key':exp['experiment_key'],'experiment_config_sha256':exp['experiment_config_sha256'],'assigned_gpu':gpu,'gpu_slot_index':gpu_slot_index,'pid':attempt_state['pid'],'actual_command':command,'command_display':shlex.join(command),'attempt':attempt,'started_at_utc':started,'completed_at_utc':now(),'runtime_seconds':time.perf_counter()-timer,'return_code':int(rc),'termination_signal':(-int(rc) if int(rc)<0 else None),'executor_exception':executor_exception,'resume_run_dir':resume_run_dir,'stdout_log':str(out.resolve()),'stderr_log':str(err.resolve()),'run_output_dir':None,'summary_path':None,'pre_run_status':'missing','post_run_status':post[exp['experiment_key']]['plan_status']}
+                row={'implementation_revision':exp.get('implementation_revision'),'experiment_key':exp['experiment_key'],'experiment_config_sha256':exp['experiment_config_sha256'],'assigned_gpu':gpu,'gpu_slot_index':gpu_slot_index,'pid':attempt_state['pid'],'actual_command':command,'command_display':shlex.join(command),'attempt':attempt,'started_at_utc':started,'completed_at_utc':now(),'runtime_seconds':time.perf_counter()-timer,'return_code':int(rc),'termination_signal':(-int(rc) if int(rc)<0 else None),'executor_exception':executor_exception,'resume_run_dir':resume_run_dir,'stdout_log':str(out.resolve()),'stderr_log':str(err.resolve()),'run_output_dir':None,'summary_path':None,'pre_run_status':'missing','post_run_status':post[exp['experiment_key']]['plan_status']}
                 paths=post[exp['experiment_key']].get('matching_summary_paths') or []
                 if paths: row['summary_path']=paths[0]; row['run_output_dir']=str(Path(paths[0]).parent)
                 row['status']='completed' if rc == 0 and row['post_run_status']=='completed' else ('interrupted' if _STOP.is_set() else 'failed')
@@ -186,7 +231,7 @@ def execute(plan, runs_root, logs_root, gpus, workdir, dry_run=False, summarize_
     smap,_=status_map(plan,runs_root)
     for e in plan['experiments']:
         if smap[e['experiment_key']]['plan_status']=='completed' and not any(r['experiment_key']==e['experiment_key'] for r in records):
-            records.append({'experiment_key':e['experiment_key'],'experiment_config_sha256':e['experiment_config_sha256'],'status':'skipped_completed','assigned_gpu':None})
+            records.append({'implementation_revision':e.get('implementation_revision'),'experiment_key':e['experiment_key'],'experiment_config_sha256':e['experiment_config_sha256'],'status':'skipped_completed','assigned_gpu':None})
     payload={'launcher_schema_version':1,'created_at_utc':now(),'interrupted':_STOP.is_set(),'halted_after_failure':halt.is_set(),'records':records}
     write_json(logs_root/'launcher_manifest.json',payload)
     fields=sorted({k for r in records for k in r})

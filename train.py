@@ -14,7 +14,9 @@ from shot_otta.config import (
 
 PROJECT_DIR = osp.dirname(osp.abspath(__file__))
 WORKSPACE_ROOT = osp.dirname(PROJECT_DIR)
-DEFAULT_CONFIG = osp.join(PROJECT_DIR, "configs", "shot_otta.yaml")
+DEFAULT_CONFIG = osp.join(
+    PROJECT_DIR, "configs", "otta_fc_lbi_protocol_20260817_v1.yaml"
+)
 
 
 def build_parser():
@@ -25,6 +27,12 @@ def build_parser():
     parser.add_argument("--target", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--gpu-id", default=None)
+    parser.add_argument("--workers-per-gpu", type=int, default=None)
+    parser.add_argument(
+        "--runtime-comparable",
+        action="store_true",
+        help="Mark this run as the formal one-GPU efficiency protocol.",
+    )
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--data-root", default=None)
@@ -61,6 +69,9 @@ def build_parser():
     parser.add_argument("--lbi-stage2-steps", type=int, default=None)
     parser.add_argument(
         "--lbi-delta-nonzero-tolerance", type=float, default=None
+    )
+    parser.add_argument(
+        "--lbi-support-threshold", type=float, default=None
     )
     parser.add_argument("--experiment-key", default=None)
     parser.add_argument("--experiment-config-sha256", default=None)

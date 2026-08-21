@@ -22,7 +22,7 @@ from visda_otta.evaluator import compute_metrics
 
 
 def _config(variant):
-    return {"variant": variant, "requested_budget": 0.001, "selection_seed": 2020, "optimization": {"lr": 0.001, "lr_decay1": 0.1, "lr_decay2": 1.0}, "lbi": {"alpha": 0.1, "kappa": 1.0, "nu": 1.0, "omega": 0.1, "stage1_max_steps": 1, "budget_tolerance": 0.0, "stage2_lr": 0.01, "stage2_steps": 1, "delta_nonzero_tolerance": 0.0}}
+    return {"variant": variant, "requested_budget": 0.001, "selection_seed": 2020, "optimization": {"lr": 0.001, "lr_decay1": 0.1, "lr_decay2": 1.0}, "lbi": {"alpha": 0.1, "kappa": 1.0, "nu": 1.0, "omega": 0.1, "stage1_max_steps": 1, "budget_tolerance": 0.0, "stage2_lr": 0.01, "stage2_steps": 1, "delta_nonzero_tolerance": 0.0, "support_threshold": 1.0e-4}}
 
 
 def _summary(key, fo, runtime):

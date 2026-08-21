@@ -47,22 +47,7 @@ from tools.summarize_runs import (  # noqa: E402
 BASE_CONFIG_PATH = osp.join(
     PROJECT_DIR,
     "configs",
-    "shot_otta.yaml",
-)
-PILOT_MATRIX_PATH = osp.join(
-    PROJECT_DIR,
-    "experiments",
-    "shot_otta_baselines.yaml",
-)
-LBI_PILOT_MATRIX_PATH = osp.join(
-    PROJECT_DIR,
-    "experiments",
-    "shot_otta_lbi_pilot.yaml",
-)
-LBI_ROUND1_MATRIX_PATH = osp.join(
-    PROJECT_DIR,
-    "experiments",
-    "shot_otta_lbi_round1_stage1.yaml",
+    "otta_fc_lbi_protocol_20260817_v1.yaml",
 )
 LBI_CONFIG_FIELDS = (
     "alpha",
@@ -74,12 +59,72 @@ LBI_CONFIG_FIELDS = (
     "stage2_lr",
     "stage2_steps",
     "delta_nonzero_tolerance",
+    "support_threshold",
 )
+
+
+def _lbi_tuple(alpha=0.1, kappa=1.0, nu=1.0):
+    return {
+        "alpha": alpha,
+        "kappa": kappa,
+        "nu": nu,
+        "omega": 0.1,
+        "stage1_max_steps": 3000,
+        "budget_tolerance": 0.0001,
+        "stage2_lr": 0.01,
+        "stage2_steps": 1,
+        "delta_nonzero_tolerance": 1.0e-12,
+        "support_threshold": 1.0e-4,
+    }
+
+
+def _pilot_matrix():
+    return {
+        "method": "shot",
+        "task": "otta",
+        "datasets": {"office": {"transfers": [[0, 1]]}},
+        "seeds": [2026],
+        "variants": {
+            "source_only": {},
+            "full_dense": {},
+            "module_dense": {},
+            "module_random": {
+                "budgets": [0.001],
+                "selection_seed_mode": "same_as_run_seed",
+            },
+            "module_magnitude": {"budgets": [0.001]},
+            "module_saliency": {"budgets": [0.001]},
+            "module_lbi": {"budgets": [0.001], "lbi": _lbi_tuple()},
+        },
+        "common_training": {"batch_size": 64, "workers": 4, "save_model": False},
+        "output_root": "260817_iclr2027-refined/runs",
+    }
+
+
+def _lbi_fixture(round1=False):
+    matrix = {
+        "method": "shot",
+        "task": "otta",
+        "datasets": {"office": {"transfers": [[0, 1]]}},
+        "seeds": [2026],
+        "variants": {"module_lbi": {"budgets": [0.001], "lbi": _lbi_tuple()}},
+        "common_training": {"batch_size": 64, "workers": 4, "save_model": False},
+        "output_root": "260817_iclr2027-refined/runs",
+    }
+    if round1:
+        matrix["variants"]["module_lbi"] = {
+            "budgets": [0.002],
+            "lbi_trials": [
+                _lbi_tuple(0.15), _lbi_tuple(0.2), _lbi_tuple(0.1, 1.5),
+                _lbi_tuple(0.1, 2.0), _lbi_tuple(0.1, 1.0, 0.5),
+            ],
+        }
+    return matrix
 
 
 def _effective(
     variant="module_random",
-    seed=2020,
+    seed=2026,
     budget=0.001,
 ):
     config = load_yaml(BASE_CONFIG_PATH)
@@ -118,8 +163,8 @@ def _check_identity():
     loss_changed["loss"]["ent_par"] = 0.75
     changed_configs.append(loss_changed)
     seed_changed = copy.deepcopy(effective)
-    seed_changed["seed"] = 2021
-    seed_changed["selection_seed"] = 2021
+    seed_changed["seed"] = 2025
+    seed_changed["selection_seed"] = 2025
     changed_configs.append(seed_changed)
     budget_changed = copy.deepcopy(effective)
     budget_changed["requested_budget"] = 0.01
@@ -134,7 +179,7 @@ def _check_identity():
 
 
 def _check_planner():
-    matrix = load_yaml(PILOT_MATRIX_PATH)
+    matrix = _pilot_matrix()
     base = load_yaml(BASE_CONFIG_PATH)
     plan = build_plan(matrix, base, BASE_CONFIG_PATH)
     assert plan["experiment_count"] == 7
@@ -161,8 +206,9 @@ def _check_planner():
     assert lbi_entry["requested_budget"] == 0.001
     assert "--lbi-alpha" in lbi_entry["command_args"]
     assert "--lbi-stage2-steps" in lbi_entry["command_args"]
+    assert "--lbi-support-threshold" in lbi_entry["command_args"]
 
-    two_budget_matrix = load_yaml(PILOT_MATRIX_PATH)
+    two_budget_matrix = _pilot_matrix()
     two_budget_matrix["variants"]["module_random"]["budgets"] = [
         0.001,
         0.01,
@@ -181,13 +227,13 @@ def _check_planner():
     assert {
         experiment["selection_seed"]
         for experiment in random_entries
-    } == {2020}
+    } == {2026}
 
     ordered = _expand_transfers("office", "all_ordered_pairs")
     assert len(ordered) == 6
     assert all(source != target for source, target in ordered)
 
-    duplicate_transfer = load_yaml(PILOT_MATRIX_PATH)
+    duplicate_transfer = _pilot_matrix()
     duplicate_transfer["datasets"]["office"]["transfers"] = [
         [0, 1],
         [0, 1],
@@ -199,8 +245,8 @@ def _check_planner():
     else:
         raise AssertionError("Duplicate transfer was not rejected")
 
-    duplicate_seed = load_yaml(PILOT_MATRIX_PATH)
-    duplicate_seed["seeds"] = [2020, 2020]
+    duplicate_seed = _pilot_matrix()
+    duplicate_seed["seeds"] = [2026, 2026]
     try:
         validate_matrix(duplicate_seed)
     except ValueError as error:
@@ -208,7 +254,7 @@ def _check_planner():
     else:
         raise AssertionError("Duplicate seed was not rejected")
 
-    self_transfer = load_yaml(PILOT_MATRIX_PATH)
+    self_transfer = _pilot_matrix()
     self_transfer["datasets"]["office"]["transfers"] = [[1, 1]]
     try:
         validate_matrix(self_transfer)
@@ -291,7 +337,7 @@ def _expect_matrix_error(matrix, expected_text):
 
 def _check_lbi_trials_planner():
     base = load_yaml(BASE_CONFIG_PATH)
-    old_matrix = load_yaml(LBI_PILOT_MATRIX_PATH)
+    old_matrix = _lbi_fixture()
     old_plan = build_plan(
         old_matrix,
         copy.deepcopy(base),
@@ -301,7 +347,7 @@ def _check_lbi_trials_planner():
     old_entry = old_plan["experiments"][0]
     assert old_entry["lbi_trial_index"] == 0
 
-    new_matrix = load_yaml(LBI_PILOT_MATRIX_PATH)
+    new_matrix = _lbi_fixture()
     single_trial = new_matrix["variants"]["module_lbi"].pop("lbi")
     new_matrix["variants"]["module_lbi"]["lbi_trials"] = [
         single_trial
@@ -325,7 +371,7 @@ def _check_lbi_trials_planner():
     assert "lbi_trial_index" not in new_entry["effective_overrides"]
     assert "--lbi-trial-index" not in new_entry["command_args"]
 
-    round1_matrix = load_yaml(LBI_ROUND1_MATRIX_PATH)
+    round1_matrix = _lbi_fixture(round1=True)
     round1_plan = build_plan(
         round1_matrix,
         copy.deepcopy(base),
@@ -400,6 +446,10 @@ def _check_lbi_trials_planner():
             )
             == override_lbi["delta_nonzero_tolerance"]
         )
+        assert (
+            float(_command_value(command, "--lbi-support-threshold"))
+            == override_lbi["support_threshold"]
+        )
     assert len(
         {
             entry["experiment_key"]
@@ -413,7 +463,7 @@ def _check_lbi_trials_planner():
         }
     ) == 5
 
-    six_matrix = load_yaml(LBI_ROUND1_MATRIX_PATH)
+    six_matrix = _lbi_fixture(round1=True)
     six_spec = six_matrix["variants"]["module_lbi"]
     six_spec["budgets"] = [0.001, 0.002]
     six_spec["lbi_trials"] = six_spec["lbi_trials"][:3]
@@ -438,22 +488,22 @@ def _check_lbi_trials_planner():
         (0.002, 2),
     ]
 
-    both = load_yaml(LBI_PILOT_MATRIX_PATH)
+    both = _lbi_fixture()
     both["variants"]["module_lbi"]["lbi_trials"] = [
         copy.deepcopy(both["variants"]["module_lbi"]["lbi"])
     ]
     _expect_matrix_error(both, "both were provided")
 
-    neither = load_yaml(LBI_PILOT_MATRIX_PATH)
+    neither = _lbi_fixture()
     del neither["variants"]["module_lbi"]["lbi"]
     _expect_matrix_error(neither, "exactly one of lbi or lbi_trials")
 
-    empty = load_yaml(LBI_PILOT_MATRIX_PATH)
+    empty = _lbi_fixture()
     del empty["variants"]["module_lbi"]["lbi"]
     empty["variants"]["module_lbi"]["lbi_trials"] = []
     _expect_matrix_error(empty, "must be a non-empty list")
 
-    wrong_container = load_yaml(LBI_PILOT_MATRIX_PATH)
+    wrong_container = _lbi_fixture()
     wrong_trial = wrong_container["variants"]["module_lbi"].pop("lbi")
     wrong_container["variants"]["module_lbi"]["lbi_trials"] = {
         "trial": wrong_trial
@@ -463,24 +513,24 @@ def _check_lbi_trials_planner():
         "must be a non-empty list",
     )
 
-    non_mapping = load_yaml(LBI_PILOT_MATRIX_PATH)
+    non_mapping = _lbi_fixture()
     del non_mapping["variants"]["module_lbi"]["lbi"]
     non_mapping["variants"]["module_lbi"]["lbi_trials"] = ["invalid"]
     _expect_matrix_error(non_mapping, "must be a mapping")
 
-    missing = load_yaml(LBI_PILOT_MATRIX_PATH)
+    missing = _lbi_fixture()
     missing_trial = missing["variants"]["module_lbi"].pop("lbi")
     del missing_trial["alpha"]
     missing["variants"]["module_lbi"]["lbi_trials"] = [missing_trial]
     _expect_matrix_error(missing, "Missing LBI config fields")
 
-    illegal = load_yaml(LBI_PILOT_MATRIX_PATH)
+    illegal = _lbi_fixture()
     illegal_trial = illegal["variants"]["module_lbi"].pop("lbi")
     illegal_trial["alpha"] = 0
     illegal["variants"]["module_lbi"]["lbi_trials"] = [illegal_trial]
     _expect_matrix_error(illegal, "lbi.alpha must be > 0")
 
-    implicit_grid = load_yaml(LBI_PILOT_MATRIX_PATH)
+    implicit_grid = _lbi_fixture()
     implicit_trial = implicit_grid["variants"]["module_lbi"].pop("lbi")
     implicit_trial["alpha"] = [0.1, 0.2]
     implicit_grid["variants"]["module_lbi"]["lbi_trials"] = [
@@ -488,7 +538,7 @@ def _check_lbi_trials_planner():
     ]
     _expect_matrix_error(implicit_grid, "Invalid LBI trial")
 
-    duplicate = load_yaml(LBI_PILOT_MATRIX_PATH)
+    duplicate = _lbi_fixture()
     duplicate_trial = duplicate["variants"]["module_lbi"].pop("lbi")
     duplicate["variants"]["module_lbi"]["lbi_trials"] = [
         copy.deepcopy(duplicate_trial),
@@ -499,7 +549,7 @@ def _check_lbi_trials_planner():
         "Duplicate LBI trial configurations at indices 0 and 1",
     )
 
-    wrong_variant = load_yaml(PILOT_MATRIX_PATH)
+    wrong_variant = _pilot_matrix()
     wrong_variant["variants"]["module_random"]["lbi_trials"] = [
         copy.deepcopy(single_trial)
     ]
@@ -508,7 +558,7 @@ def _check_lbi_trials_planner():
         "module_random must not define lbi_trials",
     )
 
-    wrong_legacy_variant = load_yaml(PILOT_MATRIX_PATH)
+    wrong_legacy_variant = _pilot_matrix()
     wrong_legacy_variant["variants"]["module_random"]["lbi"] = (
         copy.deepcopy(single_trial)
     )
