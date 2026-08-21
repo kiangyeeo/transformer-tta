@@ -1,5 +1,10 @@
 # SHOT-OTTA + FC-LBI formal experiments
 
+Transformer DeiT-S source-model training is documented separately in
+[`source_training/README.md`](source_training/README.md). It provides a
+single-GPU launcher for the three Office-31 source models and the VisDA-C
+synthetic-train source model.
+
 当前 formal study 的唯一 normative source 是
 [`protocol/shot-otta_fc/OTTA_FC_LBI_PROTOCOL_20260817_v1.md`](protocol/shot-otta_fc/OTTA_FC_LBI_PROTOCOL_20260817_v1.md)。
 本 README 只保留入口和使用说明；协议数值不在此重复维护。
