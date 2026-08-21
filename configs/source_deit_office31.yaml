@@ -40,7 +40,10 @@ training:
   finetune_scope: full_model
   epochs: 100
   batch_size: 64
-  workers: 8
+  # Python multiprocessing temp sockets cannot be cleaned reliably on this
+  # server's NFS TMPDIR. Four source jobs run concurrently, so use in-process
+  # loading for a clean and unambiguous formal log.
+  workers: 0
   seed: 2026
   label_smoothing: 0.1
   amp: true
@@ -70,3 +73,4 @@ runtime:
   device: cuda
   deterministic: true
   pin_memory: true
+  data_parallel: true

@@ -12,6 +12,10 @@ import sys
 from contextlib import nullcontext
 from datetime import datetime, timezone
 
+# CuBLAS reads this before creating a CUDA handle. Set it before importing
+# torch so deterministic=True is effective even outside the provided launchers.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -37,6 +41,12 @@ from .deit_model import (
 NO_DECAY_TOKEN_NAMES = {"cls_token", "pos_embed"}
 
 
+def _unwrap_model(model):
+    if isinstance(model, nn.DataParallel):
+        return model.module
+    return model
+
+
 def _utc_now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -56,7 +66,7 @@ def _jsonl_append(path, payload):
 def _cpu_state_dict(model):
     return {
         name: tensor.detach().cpu()
-        for name, tensor in model.state_dict().items()
+        for name, tensor in _unwrap_model(model).state_dict().items()
     }
 
 
@@ -186,7 +196,11 @@ def set_reproducibility(seed, deterministic=True):
     torch.backends.cudnn.deterministic = bool(deterministic)
     torch.backends.cudnn.benchmark = False
     if deterministic:
-        torch.use_deterministic_algorithms(True, warn_only=True)
+        if torch.cuda.is_available():
+            torch.backends.cuda.enable_flash_sdp(False)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+            torch.backends.cuda.enable_math_sdp(True)
+        torch.use_deterministic_algorithms(True, warn_only=False)
 
 
 def _is_no_decay_parameter(name, parameter):
@@ -493,7 +507,9 @@ def _restore_training_state(path, model, optimizer, scaler, config_sha256):
         raise ValueError(
             "Resume checkpoint config hash does not match the effective config"
         )
-    model.load_state_dict(payload["model_state_dict"], strict=True)
+    _unwrap_model(model).load_state_dict(
+        payload["model_state_dict"], strict=True
+    )
     optimizer.load_state_dict(payload["optimizer_state_dict"])
     scaler.load_state_dict(payload["scaler_state_dict"])
     rng = payload["rng_state"]
@@ -605,6 +621,16 @@ def run_source_training(
     optimizer, optimizer_manifest = build_adamw(
         model, training_config["optimizer"]
     )
+    visible_cuda_devices = (
+        torch.cuda.device_count() if device.type == "cuda" else 0
+    )
+    data_parallel_effective = bool(
+        runtime_config["data_parallel"] and visible_cuda_devices > 1
+    )
+    if data_parallel_effective:
+        model = nn.DataParallel(
+            model, device_ids=list(range(visible_cuda_devices))
+        )
     steps_per_epoch = math.ceil(
         len(train_dataset) / training_config["batch_size"]
     )
@@ -662,6 +688,13 @@ def run_source_training(
             "safetensors": _package_version("safetensors"),
             "cuda": torch.version.cuda,
             "device": str(device),
+            "visible_cuda_device_count": visible_cuda_devices,
+            "visible_cuda_device_names": [
+                torch.cuda.get_device_name(index)
+                for index in range(visible_cuda_devices)
+            ],
+            "data_parallel_requested": runtime_config["data_parallel"],
+            "data_parallel_effective": data_parallel_effective,
         },
         "dataset": {
             "name": data_config["dataset"],
@@ -683,14 +716,18 @@ def run_source_training(
             "head_schema": f"Linear(384,{data_config['num_classes']})",
             "head_parameter_names": [
                 name
-                for name, parameter in model.named_parameters()
+                for name, parameter in _unwrap_model(model).named_parameters()
                 if id(parameter) in {id(value) for value in head.parameters()}
             ],
             "drop_rate": model_config["drop_rate"],
             "drop_path_rate": model_config["drop_path_rate"],
-            "parameter_count": sum(p.numel() for p in model.parameters()),
+            "parameter_count": sum(
+                p.numel() for p in _unwrap_model(model).parameters()
+            ),
             "trainable_parameter_count": sum(
-                p.numel() for p in model.parameters() if p.requires_grad
+                p.numel()
+                for p in _unwrap_model(model).parameters()
+                if p.requires_grad
             ),
         },
         "pretrained": {
@@ -793,8 +830,7 @@ def run_source_training(
             f"train_loss={train_metrics['loss']:.6f} "
             f"val_overall={validation_metrics['overall_accuracy']:.3f} "
             f"val_macro={validation_metrics['macro_class_accuracy']:.3f} "
-            f"best_{checkpoint_config['selection_metric']}={best_metric:.3f}",
-            flush=True,
+            f"best_{checkpoint_config['selection_metric']}={best_metric:.3f}"
         )
 
         if improved:

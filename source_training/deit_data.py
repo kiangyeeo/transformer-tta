@@ -194,4 +194,3 @@ def build_loader(
         generator=generator,
         persistent_workers=False,
     )
-

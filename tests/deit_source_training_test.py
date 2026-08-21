@@ -79,7 +79,9 @@ def _check_configs():
         assert effective["model"]["head"] == "linear"
         assert effective["training"]["finetune_scope"] == "full_model"
         assert effective["training"]["seed"] == 2026
+        assert effective["training"]["workers"] == 0
         assert effective["data"]["split"]["seed"] == 2026
+        assert effective["runtime"]["data_parallel"] is True
         assert effective["checkpoint"]["output_path"].endswith(
             f"office31{os.sep}{domain}.pth"
         )

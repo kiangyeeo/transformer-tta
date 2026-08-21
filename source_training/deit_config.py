@@ -220,8 +220,11 @@ def resolve_source_config(config, project_root):
         training["batch_size"], "training.batch_size"
     )
     training["workers"] = int(training["workers"])
-    if training["workers"] < 0:
-        raise ValueError("training.workers must be >= 0")
+    if training["workers"] != 0:
+        raise ValueError(
+            "training.workers is frozen to 0 because multiprocessing "
+            "temporary sockets produce NFS cleanup tracebacks on this server"
+        )
     training["seed"] = int(training["seed"])
     training["label_smoothing"] = float(training["label_smoothing"])
     if not 0.0 <= training["label_smoothing"] < 1.0:
@@ -315,6 +318,7 @@ def resolve_source_config(config, project_root):
     if runtime.get("deterministic") is not True:
         raise ValueError("runtime.deterministic must be true")
     runtime["pin_memory"] = bool(runtime.get("pin_memory", True))
+    runtime["data_parallel"] = bool(runtime.get("data_parallel", True))
 
     effective["scientific_config_sha256"] = canonical_config_sha256(
         effective

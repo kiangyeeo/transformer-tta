@@ -14,6 +14,7 @@ export TORCH_HOME=/home/nas3/biod/wangkangyi/hf-cache/torch
 export PIP_CACHE_DIR=/home/nas3/biod/wangkangyi/pip-cache
 export CONDA_PKGS_DIRS=/home/nas3/biod/wangkangyi/conda-pkgs
 export TMPDIR=/home/nas3/biod/wangkangyi/tmp
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
 cd "$PROJECT_ROOT"
 
@@ -25,4 +26,3 @@ done
 
 "$PYTHON_BIN" train_source_deit.py \
   --config configs/source_deit_visda.yaml
-
