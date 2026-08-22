@@ -421,13 +421,15 @@ def run_mask_child(
             "stream": stream_record,
             "checkpoint": checkpoint_record,
             "adaptation": copy.deepcopy(config["adaptation"]),
-            "selection": selection_record,
             "optimization": copy.deepcopy(config["optimization"]),
             "loss": copy.deepcopy(config["loss"]),
             "preprocessing": copy.deepcopy(config["preprocessing"]),
             "online_batch_size": config["batch_size"],
             "fo_batch_size": config["fo_batch_size"],
             **scope_record,
+            # Keep the complete structural support record authoritative even if
+            # a future scope helper accidentally reuses the same field name.
+            "selection": selection_record,
             "model_state_sha256_before": model_state_before,
             "model_state_sha256_after_stream": model_state_after_stream,
             "model_state_sha256_after_fo": model_state_after_fo,

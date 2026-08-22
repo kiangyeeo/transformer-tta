@@ -285,6 +285,9 @@ def _tiny_model_loader(config, device):
     ]
     return model, {"path": "synthetic", "sha256": "0" * 64}, candidates, frozen, {
         "candidate_scope": "synthetic",
+        # Regression guard: a scope helper must never replace the structured
+        # child selection artifact with this descriptive string.
+        "selection": "synthetic-scope-selection",
         "trainable_tensor_count": 1,
         "trainable_scalars": model.candidate.weight.numel(),
     }
@@ -384,6 +387,8 @@ def check_end_to_end_pu_fo() -> None:
             assert summary["backward_calls"] == 2
             assert summary["off_mask_state_unchanged"] is True
             assert summary["off_mask_adam_state_zero"] is True
+            assert isinstance(summary["selection"], dict)
+            assert summary["selection"]["mask_sha256"] == "synthetic-mask"
             assert summary["frozen_head_unchanged"] is True
             assert summary["PU-sample-count"] == 3
             assert summary["FO-sample-count"] == 3

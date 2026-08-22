@@ -67,6 +67,15 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="validate every selected condition without creating a run directory",
     )
+    finalize = subparsers.add_parser(
+        "finalize", help="recover aggregates from already-completed child masks"
+    )
+    finalize.add_argument("--run-root", type=Path, required=True)
+    finalize.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate recoverability without modifying existing artifacts",
+    )
     return parser
 
 
@@ -143,6 +152,13 @@ def _dry_run_matrix(raw, config_path, selection, budgets, devices, output_root) 
 
 def main(argv=None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "finalize":
+        from .finalize import recover_completed_run
+
+        report = recover_completed_run(args.run_root, dry_run=args.dry_run)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0
+
     raw = load_config(args.config)
     if args.command == "transfer":
         output_dir = args.output_dir or _default_transfer_output(

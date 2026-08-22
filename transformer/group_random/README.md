@@ -135,3 +135,20 @@ Office rows report three-mask mean/std for every transfer; the Office summary
 is the equal-weight mean of the six transfer-level means. VisDA uses fixed
 12-class macro accuracy and `visda_per_class.csv` contains PU/FO mean and mask
 standard deviation for every class and budget.
+
+If all child masks completed but parent aggregation was interrupted or failed,
+validate and rebuild parent/top-level artifacts without rerunning a GPU job:
+
+```bash
+/home/nas3/biod/wangkangyi/envs/lbi/bin/python \
+  -m transformer.group_random finalize \
+  --run-root /absolute/path/to/group_random_seed2026_<UTC> --dry-run
+
+/home/nas3/biod/wangkangyi/envs/lbi/bin/python \
+  -m transformer.group_random finalize \
+  --run-root /absolute/path/to/group_random_seed2026_<UTC>
+```
+
+Recovery preserves failed parent/matrix files and corrected child
+summary/metrics files under `*.failed_before_recovery.*` or
+`*.pre_recovery.*` names.
