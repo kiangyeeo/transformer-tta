@@ -1,0 +1,41 @@
+# DeiT-S source-only OTTA baseline, frozen against AGENTS.md (2026-08-22).
+schema_version: 1
+protocol_revision: transformer_source_only_otta_20260822_v1
+formal_seed: 2026
+
+model:
+  name: deit_small_patch16_224.fb_in1k
+  checkpoint_root: /home/nas3/biod/wangkangyi/checkpoints/source_models
+
+data:
+  list_root: /home/nas3/biod/wangkangyi/datasets/image_lists
+  office31:
+    batch_size: 64
+    workers: 4
+    num_classes: 31
+  visda-c:
+    batch_size: 256
+    workers: 4
+    num_classes: 12
+  preprocessing:
+    resize_size: 256
+    crop_size: 224
+    interpolation: bicubic
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+    online_random_crop: true
+    online_random_horizontal_flip: true
+    fo_center_crop: true
+  stream:
+    order: fixed_random_permutation
+    one_pass: true
+    drop_last: false
+
+runtime:
+  deterministic: true
+  amp: false
+  pin_memory: true
+
+output:
+  root: /home/nas3/biod/wangkangyi/results/transformer_otta_source_only
+
