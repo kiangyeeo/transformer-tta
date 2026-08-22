@@ -1,7 +1,9 @@
-# DeiT-S source-only OTTA baseline, frozen against AGENTS.md (2026-08-22).
+# DeiT-S full-dense SHOT-OTTA baseline, frozen against AGENTS.md and FC flow.
 schema_version: 1
-protocol_revision: transformer_source_only_otta_20260822_v2_fc_preprocess
+protocol_revision: transformer_full_dense_otta_20260822_v1_fc_preprocess
 formal_seed: 2026
+method: shot
+variant: full_dense
 
 model:
   name: deit_small_patch16_224.fb_in1k
@@ -33,10 +35,28 @@ data:
     one_pass: true
     drop_last: false
 
+adaptation:
+  update_scope: all_except_head
+  model_mode: eval
+  steps_per_online_batch: 1
+
+optimization:
+  optimizer: adamw
+  lr: 1.0e-5
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.01
+
+loss:
+  components: [ent, div, pseudo]
+  cls_par: 0.3
+  ent_par: 1.0
+  threshold: 0.0
+
 runtime:
   deterministic: true
   amp: false
   pin_memory: true
 
 output:
-  root: /home/nas3/biod/wangkangyi/results/transformer_otta_source_only
+  root: /home/nas3/biod/wangkangyi/results/transformer_otta_full_dense

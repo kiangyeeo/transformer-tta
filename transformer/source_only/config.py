@@ -13,7 +13,7 @@ import yaml
 
 
 FORMAL_SEED = 2026
-PROTOCOL_REVISION = "transformer_source_only_otta_20260822_v1"
+PROTOCOL_REVISION = "transformer_source_only_otta_20260822_v2_fc_preprocess"
 MODEL_NAME = "deit_small_patch16_224.fb_in1k"
 
 DATASETS = {
@@ -122,6 +122,24 @@ def _validate_frozen_fields(config: dict[str, Any]) -> None:
     if config.get("model", {}).get("name") != MODEL_NAME:
         raise ValueError(f"model.name must be {MODEL_NAME}")
 
+    expected_dataset_settings = {
+        "office31": {
+            "batch_size": 64,
+            "fo_batch_size": 64,
+            "workers": 4,
+            "num_classes": 31,
+        },
+        "visda-c": {
+            "batch_size": 256,
+            "fo_batch_size": 256,
+            "workers": 4,
+            "num_classes": 12,
+        },
+    }
+    for dataset, expected in expected_dataset_settings.items():
+        if config.get("data", {}).get(dataset) != expected:
+            raise ValueError(f"data.{dataset} must be exactly {expected}")
+
     stream = config.get("data", {}).get("stream", {})
     expected_stream = {
         "order": "fixed_random_permutation",
@@ -140,7 +158,7 @@ def _validate_frozen_fields(config: dict[str, Any]) -> None:
     expected_preprocessing = {
         "resize_size": 256,
         "crop_size": 224,
-        "interpolation": "bicubic",
+        "interpolation": "bilinear",
         "mean": [0.485, 0.456, 0.406],
         "std": [0.229, 0.224, 0.225],
         "online_random_crop": True,
@@ -191,9 +209,13 @@ def resolve_transfer_config(
     if int(dataset_config.get("num_classes", -1)) != expected_classes:
         raise ValueError(f"{dataset} must use {expected_classes} classes")
     batch_size = int(dataset_config.get("batch_size", 0))
+    fo_batch_size = int(dataset_config.get("fo_batch_size", 0))
     workers = int(dataset_config.get("workers", -1))
-    if batch_size <= 0 or workers < 0:
-        raise ValueError("batch_size must be positive and workers non-negative")
+    if batch_size <= 0 or fo_batch_size != batch_size or workers < 0:
+        raise ValueError(
+            "batch_size must be positive, fo_batch_size must match it, "
+            "and workers must be non-negative"
+        )
 
     class_names = _read_class_mapping(
         str(class_mapping), dataset, target, str(target_list)
@@ -221,6 +243,7 @@ def resolve_transfer_config(
         "num_classes": expected_classes,
         "class_names": class_names,
         "batch_size": batch_size,
+        "fo_batch_size": fo_batch_size,
         "workers": workers,
         "target_list": str(target_list.resolve()),
         "target_list_sha256": sha256_file(target_list),

@@ -8,9 +8,14 @@ Protocol behavior:
 
 - formal seed is exactly `2026`;
 - the online target stream is one fixed seed-2026 random permutation;
-- online inputs use `Resize(256x256) -> RandomCrop(224) -> RandomHorizontalFlip`;
+- online inputs use FC-aligned bilinear
+  `Resize(256x256) -> RandomCrop(224) -> RandomHorizontalFlip`;
 - each online batch receives a separate read-only PU forward after zero update;
-- FO is a second, independent complete pass with center crop;
+- FO is a second, independent complete pass with bilinear `Resize(256x256)`
+  and center crop;
+- PU and FO both apply `ToTensor` and ImageNet normalization;
+- online/PU and FO use the same dataset-specific batch size: Office `64`,
+  VisDA-C `256` (the FC runner's FO-only `3x` batch is intentionally not used);
 - `drop_last=false`, including a size-one tail batch;
 - Office PU/FO is accumulated as total correct / total samples;
 - the Office summary is the equal-weight mean of six transfer accuracies;
@@ -87,4 +92,3 @@ source_only_seed2026_<UTC>/
 
 `aggregate.json` is the main report. Transfer `summary.json` files contain the
 full per-class PU/FO arrays and name-indexed mappings.
-

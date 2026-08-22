@@ -10,6 +10,8 @@ import sys
 import tempfile
 
 import torch
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +27,7 @@ from transformer.source_only.config import (  # noqa: E402
 )
 from transformer.source_only.aggregate import aggregate_matrix  # noqa: E402
 from transformer.source_only.data import fixed_random_order  # noqa: E402
+from transformer.source_only.data import build_transforms  # noqa: E402
 from transformer.source_only.metrics import FixedClassMeter  # noqa: E402
 
 
@@ -36,7 +39,9 @@ def check_config_and_matrix() -> None:
     _validate_frozen_fields(config)
     assert config["formal_seed"] == FORMAL_SEED == 2026
     assert config["data"]["office31"]["batch_size"] == 64
+    assert config["data"]["office31"]["fo_batch_size"] == 64
     assert config["data"]["visda-c"]["batch_size"] == 256
+    assert config["data"]["visda-c"]["fo_batch_size"] == 256
     assert config["data"]["stream"]["drop_last"] is False
     assert len(TRANSFERS) == 7
     assert len(select_transfers("office31")) == 6
@@ -53,6 +58,15 @@ def check_config_and_matrix() -> None:
     else:
         raise AssertionError("A non-formal stream seed was accepted")
 
+    changed = copy.deepcopy(config)
+    changed["data"]["visda-c"]["fo_batch_size"] = 768
+    try:
+        _validate_frozen_fields(changed)
+    except ValueError as error:
+        assert "visda-c" in str(error)
+    else:
+        raise AssertionError("The FC runner's 3x FO batch size was accepted")
+
 
 def check_stream_order() -> None:
     first = fixed_random_order(37, 2026)
@@ -61,6 +75,32 @@ def check_stream_order() -> None:
     assert first == second
     assert first != different
     assert sorted(first) == list(range(37))
+
+
+def check_fc_aligned_transforms() -> None:
+    config = load_config(CONFIG_PATH)["data"]["preprocessing"]
+    assert config["interpolation"] == "bilinear"
+    online, final = build_transforms(config)
+    assert [type(item) for item in online.transforms] == [
+        transforms.Resize,
+        transforms.RandomCrop,
+        transforms.RandomHorizontalFlip,
+        transforms.ToTensor,
+        transforms.Normalize,
+    ]
+    assert [type(item) for item in final.transforms] == [
+        transforms.Resize,
+        transforms.CenterCrop,
+        transforms.ToTensor,
+        transforms.Normalize,
+    ]
+    for pipeline in (online, final):
+        resize = pipeline.transforms[0]
+        normalize = pipeline.transforms[-1]
+        assert resize.size == (256, 256)
+        assert resize.interpolation == InterpolationMode.BILINEAR
+        assert list(normalize.mean) == [0.485, 0.456, 0.406]
+        assert list(normalize.std) == [0.229, 0.224, 0.225]
 
 
 def check_office_sample_aggregation() -> None:
@@ -121,6 +161,7 @@ def check_office_equal_transfer_aggregation() -> None:
 def main() -> int:
     check_config_and_matrix()
     check_stream_order()
+    check_fc_aligned_transforms()
     check_office_sample_aggregation()
     check_visda_fixed_12_class_macro()
     check_office_equal_transfer_aggregation()

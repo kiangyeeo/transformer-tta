@@ -89,14 +89,14 @@ def fixed_random_order(sample_count: int, seed: int) -> list[int]:
 
 def build_transforms(config: dict):
     interpolation = config.get("interpolation")
-    if interpolation != "bicubic":
-        raise ValueError("Only the frozen bicubic interpolation is supported")
+    if interpolation != "bilinear":
+        raise ValueError("Only the frozen FC-aligned bilinear interpolation is supported")
     resize_size = int(config["resize_size"])
     crop_size = int(config["crop_size"])
     normalize = transforms.Normalize(config["mean"], config["std"])
     shared = [
         transforms.Resize(
-            (resize_size, resize_size), interpolation=InterpolationMode.BICUBIC
+            (resize_size, resize_size), interpolation=InterpolationMode.BILINEAR
         )
     ]
     online = transforms.Compose(
@@ -165,7 +165,7 @@ def build_target_loaders(config: dict):
     fo_loader = _loader(
         fo_dataset,
         order=fo_order,
-        batch_size=config["batch_size"],
+        batch_size=config["fo_batch_size"],
         workers=config["workers"],
         worker_seed=config["formal_seed"] + 2,
         pin_memory=pin_memory,
@@ -175,6 +175,9 @@ def build_target_loaders(config: dict):
         "seed": config["formal_seed"],
         "sample_count": len(records),
         "batch_count": len(online_loader),
+        "online_batch_size": int(config["batch_size"]),
+        "fo_batch_count": len(fo_loader),
+        "fo_batch_size": int(config["fo_batch_size"]),
         "drop_last": False,
         "online_order_sha256": _order_sha256(online_order),
         "fo_sampler": "sequential",
@@ -183,4 +186,3 @@ def build_target_loaders(config: dict):
         "fo_worker_seed_base": config["formal_seed"] + 2,
     }
     return online_loader, fo_loader, stream_record
-

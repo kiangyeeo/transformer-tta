@@ -351,8 +351,12 @@ def run_transfer(
             "backward_calls": 0,
             "pu_is_separate_read_only_forward": True,
             "fo_is_independent_full_target_pass": True,
+            "preprocessing": config["preprocessing"],
             "online_transform": "Resize-square/RandomCrop/RandomHorizontalFlip",
             "fo_transform": "Resize-square/CenterCrop",
+            "online_batch_size": config["batch_size"],
+            "fo_batch_size": config["fo_batch_size"],
+            "fo_batch_size_policy": "same_as_online_not_fc_times_three",
             "PU-FO-equality-required": False,
             "PU-FO-equality-note": (
                 "W0 is identical, but PU uses seeded online augmentation and FO "
