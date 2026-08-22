@@ -1,0 +1,86 @@
+# DeiT-S structural-group Magnitude SHOT-OTTA baseline frozen against AGENTS.md.
+schema_version: 1
+protocol_revision: transformer_group_magnitude_otta_20260822_v1
+formal_seed: 2026
+method: shot
+variant: group_magnitude
+
+model:
+  name: deit_small_patch16_224.fb_in1k
+  checkpoint_root: /home/nas3/biod/wangkangyi/checkpoints/source_models
+
+data:
+  list_root: /home/nas3/biod/wangkangyi/datasets/image_lists
+  office31:
+    batch_size: 64
+    fo_batch_size: 64
+    workers: 4
+    num_classes: 31
+  visda-c:
+    batch_size: 256
+    fo_batch_size: 256
+    workers: 4
+    num_classes: 12
+  preprocessing:
+    resize_size: 256
+    crop_size: 224
+    interpolation: bilinear
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+    online_random_crop: true
+    online_random_horizontal_flip: true
+    fo_center_crop: true
+  stream:
+    order: fixed_random_permutation
+    one_pass: true
+    drop_last: false
+
+adaptation:
+  update_scope: last_three_blocks_qkv_proj_mlp_weights
+  candidate_blocks: [9, 10, 11]
+  candidate_suffixes:
+    - attn.qkv.weight
+    - attn.proj.weight
+    - mlp.fc1.weight
+    - mlp.fc2.weight
+  candidate_tensor_count: 12
+  candidate_scalar_count: 5308416
+  model_mode: eval
+  steps_per_online_batch: 1
+
+selection:
+  type: source_w0_structural_group_l2
+  score: paired_group_l2_norm
+  score_device: cpu
+  score_dtype: float64
+  tie_break: ascending_canonical_group_id
+  group_order: block_then_qk_vo_ffn_then_coordinate
+  total_groups: 6912
+  group_size: 768
+  budgets: [0.005, 0.01, 0.02]
+  integer_rule: floor
+  integer_budgets: [34, 69, 138]
+  ranking_source: source_checkpoint_pre_adaptation
+  mask_refresh_policy: once_before_adaptation
+
+optimization:
+  optimizer: adamw
+  lr: 1.0e-5
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.01
+
+loss:
+  components: [ent, div, pseudo]
+  cls_par: 0.3
+  ent_par: 1.0
+  threshold: 0.0
+
+runtime:
+  deterministic: true
+  amp: false
+  pin_memory: true
+
+output:
+  root: /home/nas3/biod/wangkangyi/results/transformer_otta_group_magnitude
+
