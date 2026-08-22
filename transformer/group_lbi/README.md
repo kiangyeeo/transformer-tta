@@ -104,7 +104,34 @@ The default root is:
 
 Each condition contains its effective config, manifest, raw batch JSONL and
 summary. A completed matrix adds `aggregate.json`, `results.csv`,
-`visda_per_class.csv`, logs, and matrix status. Office PU/FO uses sample-level
+`tuning_diagnostics.csv`, `visda_per_class.csv`, logs, and matrix status. Office PU/FO uses sample-level
 correct/total and the Office summary is the equal-weight mean of six transfers.
 VisDA PU/FO uses fixed-12-class macro accuracy and retains every class result,
 overall accuracy, worst-class accuracy, and class standard deviation.
+
+`summary.json -> selection` and `tuning_diagnostics.csv` retain the tuning
+health metrics over online batches: mean/min utilization, utilization >=90%
+and >=95% rates, exact 3000-step and configured-step-cap hit rates, Stage-1
+mean/max steps, rollback rate, average selected groups, budget-violation rate,
+and failure rate. For Office, `aggregate.json` and the CSV include an
+`OFFICE_POOLED` row computed by pooling all online batches from the six
+transfers; accuracy remains the required equal-transfer mean and is never
+sample- or batch-pooled.
+
+A completed condition must have `budget_violation_rate=0` and
+`failure_rate=0`. NaN, Inf, or an online-batch exception aborts the condition
+and writes an `online_batch_failure` JSONL record plus failure diagnostics in
+the failed `summary.json`; the implementation never skips a failed batch and
+continues adaptation.
+
+For a matrix that was already running before these diagnostics were added,
+rebuild the aggregate after it completes. The command reads the retained
+per-batch `metrics.jsonl`, backfills missing diagnostic fields, and does not run
+adaptation again:
+
+```bash
+/home/nas3/biod/wangkangyi/envs/lbi/bin/python \
+  -m transformer.group_lbi summarize \
+  --run-root /absolute/path/to/completed/matrix \
+  --datasets office31 --budgets all
+```

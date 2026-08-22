@@ -10,6 +10,56 @@ from pathlib import Path
 from .config import FORMAL_BUDGETS, TRANSFERS, budget_tag
 
 
+def _tuning_diagnostics(selection: dict) -> dict:
+    return {
+        "batch_count": int(selection["online_batch_count"]),
+        "average_utilization": float(selection["utilization_mean"]),
+        "minimum_utilization": float(selection["utilization_min"]),
+        "utilization_ge_90_rate": float(selection["utilization_ge_90_rate"]),
+        "utilization_ge_95_rate": float(selection["utilization_ge_95_rate"]),
+        "stage1_3000_step_hit_rate": float(selection["stage1_3000_step_hit_rate"]),
+        "stage1_step_cap": int(selection["stage1_step_cap"]),
+        "stage1_step_cap_hit_rate": float(selection["stage1_step_cap_hit_rate"]),
+        "stage1_mean_steps": float(selection["stage1_steps_mean"]),
+        "stage1_max_steps": int(selection["stage1_steps_max"]),
+        "rollback_rate": float(selection["rollback_rate"]),
+        "average_selected_groups": float(selection["average_selected_groups"]),
+        "budget_violation_rate": float(selection["budget_violation_rate"]),
+        "failure_rate": float(selection["failure_rate"]),
+    }
+
+
+def _pooled_tuning_diagnostics(rows: list[dict]) -> dict:
+    if not rows:
+        raise ValueError("Pooled tuning diagnostics require at least one condition")
+    selections = [row["selection"] for row in rows]
+    total_batches = sum(int(item["online_batch_count"]) for item in selections)
+    if total_batches <= 0:
+        raise ValueError("Pooled tuning diagnostics require completed online batches")
+    caps = {int(item["stage1_step_cap"]) for item in selections}
+    if len(caps) != 1:
+        raise ValueError("Pooled conditions use different Stage-1 step caps")
+    total = lambda field: sum(float(item[field]) for item in selections)
+    return {
+        "aggregation": "pooled over all online batches",
+        "condition_count": len(rows),
+        "batch_count": total_batches,
+        "average_utilization": total("utilization_sum") / total_batches,
+        "minimum_utilization": min(float(item["utilization_min"]) for item in selections),
+        "utilization_ge_90_rate": total("utilization_ge_90_count") / total_batches,
+        "utilization_ge_95_rate": total("utilization_ge_95_count") / total_batches,
+        "stage1_3000_step_hit_rate": total("stage1_3000_step_hit_count") / total_batches,
+        "stage1_step_cap": caps.pop(),
+        "stage1_step_cap_hit_rate": total("stage1_step_cap_hit_count") / total_batches,
+        "stage1_mean_steps": total("stage1_steps_sum") / total_batches,
+        "stage1_max_steps": max(int(item["stage1_steps_max"]) for item in selections),
+        "rollback_rate": total("rollback_count") / total_batches,
+        "average_selected_groups": total("selected_groups_sum") / total_batches,
+        "budget_violation_rate": total("budget_violation_count") / total_batches,
+        "failure_rate": total("failure_batch_count") / total_batches,
+    }
+
+
 def _load_summary(path: Path) -> dict:
     with open(path, "r", encoding="utf-8") as file_obj:
         summary = json.load(file_obj)
@@ -17,6 +67,28 @@ def _load_summary(path: Path) -> dict:
         raise ValueError(f"Group-LBI condition is not completed: {path}")
     if summary.get("variant") != "group_lbi":
         raise ValueError(f"Condition is not Group-LBI: {path}")
+    selection = summary.get("selection", {})
+    if "utilization_ge_90_rate" not in selection:
+        metrics_path = path.with_name("metrics.jsonl")
+        if not metrics_path.is_file():
+            raise ValueError(
+                f"Legacy summary needs metrics.jsonl for tuning diagnostics: {path}"
+            )
+        records = []
+        with open(metrics_path, "r", encoding="utf-8") as file_obj:
+            for line in file_obj:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if record.get("event") == "online_batch":
+                    records.append(record)
+        from .runner import _selection_summary
+
+        derived = _selection_summary(
+            records,
+            stage1_step_cap=int(summary["lbi"]["stage1_max_steps"]),
+        )
+        summary["selection"] = {**selection, **derived}
     return summary
 
 
@@ -71,6 +143,7 @@ def aggregate_matrix(run_root: Path, *, transfers=TRANSFERS, budgets=FORMAL_BUDG
                     }
                     for row in office
                 },
+                "tuning-diagnostics-pooled": _pooled_tuning_diagnostics(office),
             }
         if visda:
             if len(visda) != 1:
@@ -91,6 +164,7 @@ def aggregate_matrix(run_root: Path, *, transfers=TRANSFERS, budgets=FORMAL_BUDG
                 "FO-Acc-per-class": row["FO-Acc-per-class-by-name"],
                 "realized-K-mean": row["selection"]["realized_group_count_mean"],
                 "utilization-mean": row["selection"]["utilization_mean"],
+                "tuning-diagnostics": _tuning_diagnostics(row["selection"]),
             }
         result["budgets"][f"{budget:.3f}"] = budget_result
     return result
@@ -121,7 +195,17 @@ def write_aggregate(run_root: Path, aggregate: dict) -> None:
                 "realized-K-max": selection["realized_group_count_max"],
                 "utilization-mean": selection["utilization_mean"],
                 "rollback-count": selection["rollback_count"],
+                "rollback-rate": selection["rollback_rate"],
                 "max-steps-count": selection["max_steps_reached_count"],
+                "utilization-ge-90-rate": selection["utilization_ge_90_rate"],
+                "utilization-ge-95-rate": selection["utilization_ge_95_rate"],
+                "stage1-3000-step-hit-rate": selection["stage1_3000_step_hit_rate"],
+                "stage1-step-cap": selection["stage1_step_cap"],
+                "stage1-step-cap-hit-rate": selection["stage1_step_cap_hit_rate"],
+                "stage1-mean-steps": selection["stage1_steps_mean"],
+                "stage1-max-steps": selection["stage1_steps_max"],
+                "budget-violation-rate": selection["budget_violation_rate"],
+                "failure-rate": selection["failure_rate"],
                 "summary_path": str(Path(summary["output_dir"]) / "summary.json"),
             }
         )
@@ -152,8 +236,59 @@ def write_aggregate(run_root: Path, aggregate: dict) -> None:
             writer.writeheader()
             writer.writerows(class_rows)
 
+    tuning_rows = []
+    for summary in aggregate["transfers"]:
+        tuning_rows.append(
+            {
+                "requested_budget": summary["requested_budget"],
+                "requested_group_count": summary["requested_group_count"],
+                "dataset": summary["dataset"],
+                "transfer": summary["transfer"],
+                "aggregation": "single transfer over all online batches",
+                "condition_count": 1,
+                **_tuning_diagnostics(summary["selection"]),
+            }
+        )
+    for budget, record in aggregate["budgets"].items():
+        office = record.get("office31")
+        if office:
+            tuning_rows.append(
+                {
+                    "requested_budget": budget,
+                    "requested_group_count": record["requested_group_count"],
+                    "dataset": "office31",
+                    "transfer": "OFFICE_POOLED",
+                    **office["tuning-diagnostics-pooled"],
+                }
+            )
+    with open(
+        run_root / "tuning_diagnostics.csv", "w", encoding="utf-8", newline=""
+    ) as file_obj:
+        writer = csv.DictWriter(file_obj, fieldnames=list(tuning_rows[0]))
+        writer.writeheader()
+        writer.writerows(tuning_rows)
+
 
 def print_aggregate(aggregate: dict) -> None:
+    def print_tuning(diagnostics: dict) -> None:
+        print(
+            "  tuning: "
+            f"batches={diagnostics['batch_count']}, "
+            f"util(mean/min)={diagnostics['average_utilization']:.4f}/"
+            f"{diagnostics['minimum_utilization']:.4f}, "
+            f"u90/u95={diagnostics['utilization_ge_90_rate']:.4f}/"
+            f"{diagnostics['utilization_ge_95_rate']:.4f}, "
+            f"selected-mean={diagnostics['average_selected_groups']:.2f}, "
+            f"steps(mean/max)={diagnostics['stage1_mean_steps']:.1f}/"
+            f"{diagnostics['stage1_max_steps']}, "
+            f"hit3000={diagnostics['stage1_3000_step_hit_rate']:.4f}, "
+            f"cap={diagnostics['stage1_step_cap']}, "
+            f"cap-hit={diagnostics['stage1_step_cap_hit_rate']:.4f}, "
+            f"rollback={diagnostics['rollback_rate']:.4f}, "
+            f"violation={diagnostics['budget_violation_rate']:.4f}, "
+            f"failure={diagnostics['failure_rate']:.4f}"
+        )
+
     print("rho     dataset   transfer           PU-Acc    FO-Acc   realized-K")
     print("------  --------  -----------------  --------  --------  ----------")
     for row in aggregate["transfers"]:
@@ -169,9 +304,11 @@ def print_aggregate(aggregate: dict) -> None:
                 f"rho={budget} Office equal-transfer mean: "
                 f"PU={office['PU-Acc']:.3f}, FO={office['FO-Acc']:.3f}"
             )
+            print_tuning(office["tuning-diagnostics-pooled"])
         visda = record.get("visda-c")
         if visda:
             print(
                 f"rho={budget} VisDA fixed-12 macro: "
                 f"PU={visda['PU-Acc']:.3f}, FO={visda['FO-Acc']:.3f}"
             )
+            print_tuning(visda["tuning-diagnostics"])

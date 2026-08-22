@@ -65,6 +65,16 @@ def _parser() -> argparse.ArgumentParser:
     matrix.add_argument("--no-stream-checkpoint", action="store_true")
     matrix.add_argument("--dry-run", action="store_true")
     _add_lbi_arguments(matrix)
+
+    summarize = subparsers.add_parser(
+        "summarize",
+        help="rebuild aggregate and tuning diagnostics from a completed matrix",
+    )
+    summarize.add_argument("--run-root", type=Path, required=True)
+    summarize.add_argument(
+        "--datasets", choices=["all", "office31", "visda-c"], default="all"
+    )
+    summarize.add_argument("--budgets", default="all")
     return parser
 
 
@@ -189,6 +199,20 @@ def main(argv=None) -> int:
         from .runner import run_transfer
 
         run_transfer(resolved, PROJECT_ROOT, show_progress=not args.no_progress)
+        return 0
+
+    if args.command == "summarize":
+        from .aggregate import aggregate_matrix, print_aggregate, write_aggregate
+
+        run_root = args.run_root.resolve()
+        if not run_root.is_dir():
+            raise FileNotFoundError(f"Completed matrix root does not exist: {run_root}")
+        transfers = select_transfers(args.datasets)
+        budgets = parse_budgets(args.budgets)
+        aggregate = aggregate_matrix(run_root, transfers=transfers, budgets=budgets)
+        write_aggregate(run_root, aggregate)
+        print_aggregate(aggregate)
+        print(f"Rebuilt tuning diagnostics: {run_root / 'tuning_diagnostics.csv'}")
         return 0
 
     raw = load_config(args.config)

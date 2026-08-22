@@ -248,12 +248,22 @@ def _validate_histories(histories: dict, completed_batches: int) -> None:
             )
 
 
-def _selection_summary(step_records: list[dict]) -> dict:
+def _selection_summary(step_records: list[dict], *, stage1_step_cap: int) -> dict:
     if not step_records:
         raise ValueError("Group-LBI selection summary requires online batches")
     realized = [int(row["realized_group_count"]) for row in step_records]
     utilization = [float(row["utilization"]) for row in step_records]
     steps = [int(row["stage1_steps_completed"]) for row in step_records]
+    batch_count = len(step_records)
+    utilization_ge_90_count = sum(value >= 0.90 for value in utilization)
+    utilization_ge_95_count = sum(value >= 0.95 for value in utilization)
+    step_cap_hit_count = sum(value == int(stage1_step_cap) for value in steps)
+    step_3000_hit_count = sum(value == 3000 for value in steps)
+    rollback_count = sum(bool(row["stage1_rollback_used"]) for row in step_records)
+    budget_violation_count = sum(
+        int(row["realized_group_count"]) > int(row["requested_group_count"])
+        for row in step_records
+    )
     historical = {
         int(group_id)
         for row in step_records
@@ -268,19 +278,37 @@ def _selection_summary(step_records: list[dict]) -> dict:
         for block in (9, 10, 11)
     }
     return {
-        "online_batch_count": len(step_records),
+        "online_batch_count": batch_count,
+        "selected_groups_sum": sum(realized),
+        "average_selected_groups": statistics.fmean(realized),
         "realized_group_count_mean": statistics.fmean(realized),
         "realized_group_count_min": min(realized),
         "realized_group_count_max": max(realized),
+        "utilization_sum": sum(utilization),
         "utilization_mean": statistics.fmean(utilization),
         "utilization_min": min(utilization),
         "utilization_max": max(utilization),
+        "utilization_ge_90_count": utilization_ge_90_count,
+        "utilization_ge_90_rate": utilization_ge_90_count / batch_count,
+        "utilization_ge_95_count": utilization_ge_95_count,
+        "utilization_ge_95_rate": utilization_ge_95_count / batch_count,
+        "stage1_step_cap": int(stage1_step_cap),
+        "stage1_step_cap_hit_count": step_cap_hit_count,
+        "stage1_step_cap_hit_rate": step_cap_hit_count / batch_count,
+        "stage1_3000_step_hit_count": step_3000_hit_count,
+        "stage1_3000_step_hit_rate": step_3000_hit_count / batch_count,
+        "stage1_steps_sum": sum(steps),
         "stage1_steps_mean": statistics.fmean(steps),
         "stage1_steps_min": min(steps),
         "stage1_steps_max": max(steps),
-        "rollback_count": sum(bool(row["stage1_rollback_used"]) for row in step_records),
+        "rollback_count": rollback_count,
+        "rollback_rate": rollback_count / batch_count,
         "budget_reached_count": sum(row["stage1_stop_reason"] == "budget_reached" for row in step_records),
         "max_steps_reached_count": sum(row["stage1_stop_reason"] == "max_steps_reached" for row in step_records),
+        "budget_violation_count": budget_violation_count,
+        "budget_violation_rate": budget_violation_count / batch_count,
+        "failure_batch_count": 0,
+        "failure_rate": 0.0,
         "historical_active_group_union_count": len(historical),
         "historical_active_group_union_ratio": len(historical) / TOTAL_GROUPS,
         "historical_active_group_ids": sorted(historical),
@@ -342,6 +370,13 @@ def run_transfer(
     }
     _atomic_json(paths["manifest"], base_manifest)
 
+    failure_context = {
+        "phase": "setup",
+        "batch_index": None,
+        "completed_batches": 0,
+        "target_batch_count": None,
+    }
+
     previous_handlers = {}
     interruption = {"signum": None}
 
@@ -373,6 +408,7 @@ def run_transfer(
         frozen_hash_before = hash_tensors(frozen_named_state(model, candidate_name_set))
         classifier_hash_before = _classifier_hash(model)
         online_loader, fo_loader, stream_record = build_target_loaders(config)
+        failure_context["target_batch_count"] = len(online_loader)
         set_reproducibility(config["formal_seed"], config["runtime"]["deterministic"])
 
         pu_meter = FixedClassMeter(config["num_classes"], config["class_names"])
@@ -384,6 +420,7 @@ def run_transfer(
         if resume:
             payload = _load_checkpoint(output_dir, config, candidates)
             completed_batches = int(payload["completed_batches"])
+            failure_context["completed_batches"] = completed_batches
             if not 0 <= completed_batches <= len(online_loader):
                 raise RuntimeError("Resume batch position is outside the target stream")
             pu_meter.confusion.copy_(payload["pu_confusion"])
@@ -419,6 +456,8 @@ def run_transfer(
             if resume_rng_state is not None:
                 _restore_rng_state(resume_rng_state)
                 resume_rng_state = None
+            failure_context["phase"] = "online_adaptation"
+            failure_context["batch_index"] = batch_index
             images = images.to(device, non_blocking=True)
             _sync(device)
             if device.type == "cuda":
@@ -465,6 +504,7 @@ def run_transfer(
                 raise RuntimeError("Frozen classifier changed during Group-LBI")
 
             pu_started = time.perf_counter()
+            failure_context["phase"] = "online_pu"
             with torch.inference_mode():
                 post_logits = model(images)
             _sync(device)
@@ -497,6 +537,8 @@ def run_transfer(
             histories["peak_reserved"].append(reserved_mb)
             histories["step_records"].append(step_record)
             completed_batches = batch_index
+            failure_context["completed_batches"] = completed_batches
+            failure_context["phase"] = "online_bookkeeping"
 
             _append_jsonl(
                 paths["metrics"],
@@ -546,6 +588,7 @@ def run_transfer(
                     f"signal {interruption['signum']} handled after batch {batch_index} checkpoint"
                 )
         progress.close()
+        failure_context["phase"] = "post_stream_validation"
 
         _validate_indices(pu_indices, stream_record["sample_count"], phase="PU", online=True)
         if completed_batches != len(online_loader):
@@ -582,6 +625,7 @@ def run_transfer(
             disable=not show_progress,
         )
         with torch.inference_mode():
+            failure_context["phase"] = "fo"
             for batch_index, (images, labels, indices) in enumerate(fo_progress, start=1):
                 images = images.to(device, non_blocking=True)
                 _sync(device)
@@ -623,7 +667,11 @@ def run_transfer(
 
         pu_metrics = prefixed(pu_meter.compute(config["dataset"]), "PU")
         fo_metrics = prefixed(fo_meter.compute(config["dataset"]), "FO")
-        selection_summary = _selection_summary(histories["step_records"])
+        failure_context["phase"] = "finalize"
+        selection_summary = _selection_summary(
+            histories["step_records"],
+            stage1_step_cap=int(config["lbi"]["stage1_max_steps"]),
+        )
         final_group_record = {
             "group_count": len(final_source_relative_groups),
             "group_ratio": len(final_source_relative_groups) / TOTAL_GROUPS,
@@ -727,6 +775,24 @@ def run_transfer(
             f"PU-Acc={summary['PU-Acc']:.4f} FO-Acc={summary['FO-Acc']:.4f}",
             flush=True,
         )
+        print(
+            "  tuning: "
+            f"batches={selection_summary['online_batch_count']} "
+            f"util(mean/min)={selection_summary['utilization_mean']:.4f}/"
+            f"{selection_summary['utilization_min']:.4f} "
+            f"u90/u95={selection_summary['utilization_ge_90_rate']:.4f}/"
+            f"{selection_summary['utilization_ge_95_rate']:.4f} "
+            f"selected-mean={selection_summary['average_selected_groups']:.2f} "
+            f"steps(mean/max)={selection_summary['stage1_steps_mean']:.1f}/"
+            f"{selection_summary['stage1_steps_max']} "
+            f"hit3000={selection_summary['stage1_3000_step_hit_rate']:.4f} "
+            f"cap={selection_summary['stage1_step_cap']} "
+            f"cap-hit={selection_summary['stage1_step_cap_hit_rate']:.4f} "
+            f"rollback={selection_summary['rollback_rate']:.4f} "
+            f"violation={selection_summary['budget_violation_rate']:.4f} "
+            f"failure={selection_summary['failure_rate']:.4f}",
+            flush=True,
+        )
         return summary
     except StreamInterrupted as error:
         interrupted = {
@@ -741,12 +807,45 @@ def run_transfer(
         _atomic_json(paths["summary"], interrupted)
         raise
     except BaseException as error:
+        failed_online_batch = failure_context["phase"] in {
+            "online_adaptation",
+            "online_pu",
+        }
+        target_batch_count = failure_context["target_batch_count"]
+        failure_batch_count = int(failed_online_batch)
+        failure_rate = (
+            failure_batch_count / int(target_batch_count)
+            if target_batch_count
+            else None
+        )
+        failure_diagnostics = {
+            "failure_phase": failure_context["phase"],
+            "failure_batch_index": failure_context["batch_index"],
+            "completed_online_batch_count": failure_context["completed_batches"],
+            "target_batch_count": target_batch_count,
+            "failure_batch_count": failure_batch_count,
+            "failure_rate": failure_rate,
+            "failure_is_nan_or_inf": isinstance(error, FloatingPointError),
+        }
+        if failed_online_batch:
+            _append_jsonl(
+                paths["metrics"],
+                {
+                    "schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "event": "online_batch_failure",
+                    "batch_index": failure_context["batch_index"],
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                    **failure_diagnostics,
+                },
+            )
         failure = {
             **base_manifest,
             "status": "failed",
             "completed_at_utc": _utc_now(),
             "error_type": type(error).__name__,
             "error": str(error),
+            "tuning_diagnostics": failure_diagnostics,
             "stream_checkpoint_retained": _checkpoint_paths(output_dir)["state"].is_file(),
         }
         _atomic_json(paths["manifest"], failure)

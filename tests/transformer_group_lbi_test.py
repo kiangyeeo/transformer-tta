@@ -33,6 +33,11 @@ from transformer.group_lbi.config import (  # noqa: E402
     resolve_lbi_profile,
     resolve_transfer_config,
 )
+from transformer.group_lbi.aggregate import (  # noqa: E402
+    _load_summary,
+    _pooled_tuning_diagnostics,
+    write_aggregate,
+)
 from transformer.group_lbi.engine import (  # noqa: E402
     GroupSplitLBIEngine,
     group_soft_threshold,
@@ -50,6 +55,7 @@ from transformer.group_lbi.runner import (  # noqa: E402
     _load_checkpoint,
     _remove_checkpoint,
     _save_checkpoint,
+    _selection_summary,
     _truncate_online_metrics,
     _validate_histories,
 )
@@ -374,6 +380,120 @@ def check_metrics_keep_tail_and_fixed_classes() -> None:
     assert result["overall-Acc"] == 1200.0 / 13.0
 
 
+def check_tuning_diagnostics() -> None:
+    records = []
+    for index, (selected, steps, rollback) in enumerate(
+        ((8, 100, False), (9, 3000, False), (10, 200, True), (10, 3000, True))
+    ):
+        records.append(
+            {
+                "realized_group_count": selected,
+                "requested_group_count": 10,
+                "utilization": selected / 10.0,
+                "stage1_steps_completed": steps,
+                "stage1_rollback_used": rollback,
+                "stage1_stop_reason": (
+                    "strict_budget_rollback"
+                    if rollback
+                    else ("max_steps_reached" if steps == 3000 else "budget_reached")
+                ),
+                "selected_group_ids": list(range(selected)),
+                "selected_by_kind": {"QK": selected, "VO": 0, "FFN": 0},
+                "selected_by_block": {"9": selected, "10": 0, "11": 0},
+                "batch": index,
+            }
+        )
+    summary = _selection_summary(records, stage1_step_cap=3000)
+    assert summary["online_batch_count"] == 4
+    assert summary["average_selected_groups"] == 9.25
+    assert summary["utilization_mean"] == 0.925
+    assert summary["utilization_min"] == 0.8
+    assert summary["utilization_ge_90_count"] == 3
+    assert summary["utilization_ge_90_rate"] == 0.75
+    assert summary["utilization_ge_95_count"] == 2
+    assert summary["utilization_ge_95_rate"] == 0.5
+    assert summary["stage1_3000_step_hit_rate"] == 0.5
+    assert summary["stage1_step_cap_hit_rate"] == 0.5
+    assert summary["stage1_steps_mean"] == 1575
+    assert summary["stage1_steps_max"] == 3000
+    assert summary["rollback_rate"] == 0.5
+    assert summary["budget_violation_rate"] == 0.0
+    assert summary["failure_rate"] == 0.0
+
+    pooled = _pooled_tuning_diagnostics(
+        [{"selection": summary}, {"selection": copy.deepcopy(summary)}]
+    )
+    assert pooled["condition_count"] == 2
+    assert pooled["batch_count"] == 8
+    assert pooled["average_utilization"] == 0.925
+    assert pooled["utilization_ge_90_rate"] == 0.75
+    assert pooled["stage1_step_cap_hit_rate"] == 0.5
+    assert pooled["rollback_rate"] == 0.5
+
+    with tempfile.TemporaryDirectory(prefix="group_lbi_legacy_summary_") as value:
+        condition = Path(value)
+        (condition / "summary.json").write_text(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "variant": "group_lbi",
+                    "selection": {"requested_group_count": 10},
+                    "lbi": {"stage1_max_steps": 3000},
+                }
+            ),
+            encoding="utf-8",
+        )
+        with open(condition / "metrics.jsonl", "w", encoding="utf-8") as file_obj:
+            for index, record in enumerate(records, start=1):
+                file_obj.write(
+                    json.dumps(
+                        {
+                            "event": "online_batch",
+                            "batch_index": index,
+                            **record,
+                        }
+                    )
+                    + "\n"
+                )
+        legacy = _load_summary(condition / "summary.json")
+        assert legacy["selection"]["utilization_ge_90_rate"] == 0.75
+        assert legacy["selection"]["stage1_3000_step_hit_rate"] == 0.5
+        assert legacy["selection"]["average_selected_groups"] == 9.25
+
+    with tempfile.TemporaryDirectory(prefix="group_lbi_tuning_csv_") as value:
+        root = Path(value)
+        transfer = {
+            "requested_budget": 0.005,
+            "requested_group_count": 10,
+            "dataset": "office31",
+            "transfer": "amazon->dslr",
+            "formal_seed": 2026,
+            "primary_metric": "sample_overall_accuracy",
+            "PU-Acc": 75.0,
+            "FO-Acc": 74.0,
+            "PU-overall-Acc": 75.0,
+            "FO-overall-Acc": 74.0,
+            "selection": summary,
+            "output_dir": str(root / "condition"),
+        }
+        aggregate = {
+            "status": "completed",
+            "transfers": [transfer],
+            "budgets": {
+                "0.005": {
+                    "requested_group_count": 10,
+                    "office31": {"tuning-diagnostics-pooled": pooled},
+                }
+            },
+        }
+        write_aggregate(root, aggregate)
+        rows = (root / "tuning_diagnostics.csv").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        assert len(rows) == 3
+        assert "OFFICE_POOLED" in rows[2]
+
+
 def main() -> None:
     check_config_profiles_budgets_and_overrides()
     check_group_layout_prox_and_support()
@@ -383,6 +503,7 @@ def main() -> None:
     check_identity_changes_with_lbi_profile()
     check_checkpoint_roundtrip_and_metric_truncation()
     check_metrics_keep_tail_and_fixed_classes()
+    check_tuning_diagnostics()
     print("Transformer Group-LBI tests passed")
 
 
