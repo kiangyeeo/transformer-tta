@@ -6,6 +6,7 @@ PYTHON_BIN=/home/nas3/biod/wangkangyi/envs/lbi/bin/python
 CONFIG_PATH="$PROJECT_ROOT/transformer/group_lbi/config.yaml"
 OUTPUT_ROOT=/home/nas3/biod/wangkangyi/results/transformer_otta_group_lbi
 GROUP_LBI_GPUS=${GROUP_LBI_GPUS:-0,1,2,3,4,5,6,7}
+GROUP_LBI_RHOS=${GROUP_LBI_RHOS:-all}
 
 export HF_HOME=/home/nas3/biod/wangkangyi/hf-cache
 export TORCH_HOME=/home/nas3/biod/wangkangyi/hf-cache/torch
@@ -22,6 +23,6 @@ cd "$PROJECT_ROOT"
 exec "$PYTHON_BIN" -m transformer.group_lbi matrix \
   --config "$CONFIG_PATH" \
   --datasets all \
-  --budgets all \
+  --rhos "$GROUP_LBI_RHOS" \
   --devices "$GROUP_LBI_GPUS" \
   --output-root "$OUTPUT_ROOT"

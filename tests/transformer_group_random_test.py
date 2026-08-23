@@ -71,6 +71,10 @@ def check_config_budgets_and_identity() -> None:
     assert [budget_group_count(item) for item in FORMAL_BUDGETS] == [34, 69, 138]
     assert parse_budgets("all") == FORMAL_BUDGETS
     assert parse_budgets("0.005,0.02") == (0.005, 0.02)
+    assert parse_budgets("0.0005") == (0.0005,)
+    assert budget_group_count(0.0005) == 3
+    assert budget_tag(0.0005) == "rho-0.0005"
+    assert budget_tag(0.01) == "rho-0.010"
     assert MASK_SEEDS == (202600, 202601, 202602)
     validate_devices(["0", "1"])
     for invalid in ([], ["cpu", "0"], ["0", "0"]):

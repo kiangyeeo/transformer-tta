@@ -25,7 +25,10 @@ BUDGET_TO_K = {budget: math.floor(budget * TOTAL_GROUPS) for budget in FORMAL_BU
 
 
 def budget_tag(budget: float) -> str:
-    return f"rho-{normalize_budget(budget):.3f}"
+    value = normalize_budget(budget)
+    if value in FORMAL_BUDGETS:
+        return f"rho-{value:.3f}"
+    return f"rho-{value:.12g}"
 
 
 def normalize_budget(value: float | str) -> float:
@@ -33,9 +36,14 @@ def normalize_budget(value: float | str) -> float:
     for budget in FORMAL_BUDGETS:
         if math.isclose(parsed, budget, rel_tol=0.0, abs_tol=1.0e-12):
             return budget
-    raise ValueError(
-        f"budget must be one of {', '.join(str(item) for item in FORMAL_BUDGETS)}"
-    )
+    if not math.isfinite(parsed) or parsed <= 0.0 or parsed > 1.0:
+        raise ValueError("rho must be finite and in the interval (0, 1]")
+    if math.floor(parsed * TOTAL_GROUPS) < 1:
+        raise ValueError(
+            f"rho={parsed:.12g} selects zero groups; rho must be at least "
+            f"1/{TOTAL_GROUPS}"
+        )
+    return parsed
 
 
 def parse_budgets(selection: str | Iterable[float]) -> tuple[float, ...]:
@@ -54,7 +62,7 @@ def parse_budgets(selection: str | Iterable[float]) -> tuple[float, ...]:
 
 
 def budget_group_count(budget: float | str) -> int:
-    return BUDGET_TO_K[normalize_budget(budget)]
+    return math.floor(normalize_budget(budget) * TOTAL_GROUPS)
 
 
 def _candidate_compatible_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -153,4 +161,3 @@ def select_transfers(selection: str) -> tuple[tuple[str, str, str], ...]:
     if selection == "visda-c":
         return tuple(item for item in TRANSFERS if item[0] == "visda-c")
     raise ValueError("selection must be all, office31, or visda-c")
-

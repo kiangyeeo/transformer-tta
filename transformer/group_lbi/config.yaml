@@ -116,9 +116,11 @@ lbi_profiles:
         tau_g: 1.0e-4
         stage1_max_steps: 3000
         stage2_lr: 1.0e-5
+    default: *provisional
     "0.010": *provisional
     "0.020": *provisional
   visda-c:
+    default: *provisional
     "0.005": *provisional
     "0.010": *provisional
     "0.020": *provisional

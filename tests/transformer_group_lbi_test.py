@@ -29,7 +29,9 @@ from transformer.group_lbi.config import (  # noqa: E402
     TOTAL_GROUPS,
     _validate_frozen_fields,
     budget_group_count,
+    budget_tag,
     load_config,
+    parse_budgets,
     resolve_lbi_profile,
     resolve_transfer_config,
 )
@@ -78,6 +80,11 @@ def check_config_profiles_budgets_and_overrides() -> None:
     assert FORMAL_BUDGETS == (0.005, 0.01, 0.02)
     assert BUDGET_TO_K == {0.005: 34, 0.01: 69, 0.02: 138}
     assert [budget_group_count(value) for value in FORMAL_BUDGETS] == [34, 69, 138]
+    assert parse_budgets("all") == FORMAL_BUDGETS
+    assert parse_budgets("0.0005") == (0.0005,)
+    assert budget_group_count(0.0005) == 3
+    assert budget_tag(0.0005) == "rho-0.0005"
+    assert budget_tag(0.01) == "rho-0.010"
     office = resolve_lbi_profile(config, "office31", 0.005)
     visda = resolve_lbi_profile(config, "visda-c", 0.02)
     assert office["status"] == visda["status"] == "provisional_default"
@@ -85,6 +92,10 @@ def check_config_profiles_budgets_and_overrides() -> None:
     overridden = resolve_lbi_profile(config, "office31", 0.005, {"alpha": 0.2})
     assert overridden["alpha"] == 0.2
     assert resolve_lbi_profile(config, "office31", 0.010)["alpha"] == 0.1
+    custom = resolve_lbi_profile(config, "office31", 0.0005)
+    assert custom["profile_key"] == "office31/default"
+    assert custom["requested_rho_key"] == "0.0005"
+    assert custom["alpha"] == 0.1 and custom["stage2_lr"] == 1.0e-5
 
 
 def _candidate_tensors():
@@ -161,6 +172,13 @@ def check_old_state_budget_masked_delta_and_omega() -> None:
     assert torch.equal(initialized["x"], torch.tensor([1.5, 2.0, 3.5]))
     applied = omega_accumulation(base, initialized, 0.2)
     assert torch.allclose(applied["x"], torch.tensor([1.1, 2.0, 3.1]))
+
+    # Omega accumulation must be an exact no-op wherever Stage 2 left the
+    # parameter unchanged.  A weighted-sum implementation can perturb equal
+    # float32 operands by one or more ULPs.
+    unchanged = {"x": torch.linspace(-3.14159, 2.71828, 4096)}
+    unchanged_applied = omega_accumulation(unchanged, unchanged, 0.1)
+    assert torch.equal(unchanged_applied["x"], unchanged["x"])
 
     first = GroupSplitLBIEngine.initialize([("x", nn.Parameter(torch.ones(2)))])
     first.theta_delta["x"].fill_(3.0)

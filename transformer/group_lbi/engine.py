@@ -204,7 +204,9 @@ def omega_accumulation(base: TensorMap, refined: TensorMap, omega: float) -> Ten
     if not 0.0 <= float(omega) <= 1.0:
         raise ValueError("omega must be in [0, 1]")
     return {
-        name: (1.0 - float(omega)) * base[name] + float(omega) * refined[name]
+        # The increment form is algebraically equivalent to the weighted sum,
+        # but preserves off-mask coordinates bitwise when refined == base.
+        name: base[name] + float(omega) * (refined[name] - base[name])
         for name in base
     }
 

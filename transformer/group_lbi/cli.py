@@ -10,7 +10,6 @@ from pathlib import Path
 import yaml
 
 from .config import (
-    FORMAL_BUDGETS,
     budget_tag,
     lbi_cli_overrides,
     load_config,
@@ -46,7 +45,10 @@ def _parser() -> argparse.ArgumentParser:
     transfer.add_argument("--dataset", choices=["office31", "visda-c"])
     transfer.add_argument("--source")
     transfer.add_argument("--target")
-    transfer.add_argument("--budget", type=float, choices=FORMAL_BUDGETS)
+    transfer.add_argument(
+        "--budget", "--rho", dest="budget", type=float,
+        help="structural-group ratio rho; custom values are allowed",
+    )
     transfer.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     transfer.add_argument("--output-dir", type=Path)
     transfer.add_argument("--resume-run-dir", type=Path)
@@ -58,7 +60,10 @@ def _parser() -> argparse.ArgumentParser:
     matrix = subparsers.add_parser("matrix", help="schedule conditions over GPUs")
     matrix.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     matrix.add_argument("--datasets", choices=["all", "office31", "visda-c"], default="all")
-    matrix.add_argument("--budgets", default="all")
+    matrix.add_argument(
+        "--budgets", "--rhos", "--rho", dest="budgets", default="all",
+        help="all (default formal rhos), or custom comma-separated rho values",
+    )
     matrix.add_argument("--devices", default="0")
     matrix.add_argument("--output-root", type=Path)
     matrix.add_argument("--resume-run-root", type=Path)
@@ -74,7 +79,9 @@ def _parser() -> argparse.ArgumentParser:
     summarize.add_argument(
         "--datasets", choices=["all", "office31", "visda-c"], default="all"
     )
-    summarize.add_argument("--budgets", default="all")
+    summarize.add_argument(
+        "--budgets", "--rhos", "--rho", dest="budgets", default="all"
+    )
     return parser
 
 

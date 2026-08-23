@@ -10,7 +10,6 @@ from pathlib import Path
 import yaml
 
 from .config import (
-    FORMAL_BUDGETS,
     budget_tag,
     load_config,
     parse_budgets,
@@ -36,7 +35,10 @@ def _parser() -> argparse.ArgumentParser:
     transfer.add_argument("--dataset", required=True, choices=["office31", "visda-c"])
     transfer.add_argument("--source", required=True)
     transfer.add_argument("--target", required=True)
-    transfer.add_argument("--budget", required=True, type=float, choices=FORMAL_BUDGETS)
+    transfer.add_argument(
+        "--budget", "--rho", dest="budget", required=True, type=float,
+        help="structural-group ratio rho; custom values are allowed",
+    )
     transfer.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     transfer.add_argument("--output-dir", type=Path)
     transfer.add_argument("--no-progress", action="store_true")
@@ -54,9 +56,10 @@ def _parser() -> argparse.ArgumentParser:
         "--datasets", choices=["all", "office31", "visda-c"], default="all"
     )
     matrix.add_argument(
-        "--budgets",
+        "--budgets", "--rhos", "--rho",
+        dest="budgets",
         default="all",
-        help="all, or a comma-separated subset of 0.005,0.01,0.02",
+        help="all (default formal rhos), or custom comma-separated rho values",
     )
     matrix.add_argument(
         "--devices", default="0", help="comma-separated physical GPU ids, or cpu"
@@ -183,4 +186,3 @@ def main(argv=None) -> int:
         devices=devices,
     )
     return 0
-

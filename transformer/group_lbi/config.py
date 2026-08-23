@@ -39,17 +39,28 @@ def normalize_budget(value: float | str) -> float:
     for budget in FORMAL_BUDGETS:
         if math.isclose(parsed, budget, rel_tol=0.0, abs_tol=1.0e-12):
             return budget
-    raise ValueError(
-        f"budget must be one of {', '.join(str(item) for item in FORMAL_BUDGETS)}"
-    )
+    if not math.isfinite(parsed) or parsed <= 0.0 or parsed > 1.0:
+        raise ValueError("rho must be finite and in the interval (0, 1]")
+    if math.floor(parsed * TOTAL_GROUPS) < 1:
+        raise ValueError(
+            f"rho={parsed:.12g} selects zero groups; rho must be at least "
+            f"1/{TOTAL_GROUPS}"
+        )
+    return parsed
 
 
 def budget_tag(budget: float | str) -> str:
-    return f"rho-{normalize_budget(budget):.3f}"
+    value = normalize_budget(budget)
+    if value in FORMAL_BUDGETS:
+        return f"rho-{value:.3f}"
+    return f"rho-{value:.12g}"
 
 
 def profile_budget_key(budget: float | str) -> str:
-    return f"{normalize_budget(budget):.3f}"
+    value = normalize_budget(budget)
+    if value in FORMAL_BUDGETS:
+        return f"{value:.3f}"
+    return f"{value:.12g}"
 
 
 def parse_budgets(selection: str | Iterable[float]) -> tuple[float, ...]:
@@ -68,7 +79,7 @@ def parse_budgets(selection: str | Iterable[float]) -> tuple[float, ...]:
 
 
 def budget_group_count(budget: float | str) -> int:
-    return BUDGET_TO_K[normalize_budget(budget)]
+    return math.floor(normalize_budget(budget) * TOTAL_GROUPS)
 
 
 def lbi_cli_overrides(args) -> dict[str, Any]:
@@ -141,17 +152,26 @@ def resolve_lbi_profile(
         raise ValueError(f"lbi_profiles.{dataset} must be a mapping")
     key = profile_budget_key(budget)
     profile = dataset_profiles.get(key)
+    resolved_profile_key = key
     if not isinstance(profile, dict):
-        raise ValueError(f"Missing LBI profile for {dataset} budget {key}")
+        profile = dataset_profiles.get("default")
+        resolved_profile_key = "default"
+    if not isinstance(profile, dict):
+        raise ValueError(
+            f"Missing LBI profile for {dataset} budget {key} and no default profile exists"
+        )
     values = copy.deepcopy(profile.get("parameters"))
     if not isinstance(values, dict):
         raise ValueError(f"LBI profile {dataset}/{key} is missing parameters")
     values.update(overrides or {})
-    return {
+    resolved = {
         "status": str(profile.get("status", "unresolved")),
-        "profile_key": f"{dataset}/{key}",
+        "profile_key": f"{dataset}/{resolved_profile_key}",
         **validate_lbi_profile(values),
     }
+    if resolved_profile_key == "default":
+        resolved["requested_rho_key"] = key
+    return resolved
 
 
 def _candidate_compatible_config(config: dict[str, Any]) -> dict[str, Any]:

@@ -107,6 +107,15 @@ Run only Office-31, only VisDA-C, or a budget subset:
   --devices 0,1,2,3,4,5,6,7
 ```
 
+The default matrix remains `0.005,0.01,0.02`. Custom structural rho values are
+also accepted and use `floor(rho * 6912)` groups:
+
+```bash
+/home/nas3/biod/wangkangyi/envs/lbi/bin/python \
+  -m transformer.group_magnitude matrix \
+  --datasets all --rho 0.0005 --devices 0,1
+```
+
 The matrix process displays condition-level tqdm progress. Each subprocess's
 online and FO batch bars are stored in `logs/*.log`; use `tail -F` on one log
 to follow it.

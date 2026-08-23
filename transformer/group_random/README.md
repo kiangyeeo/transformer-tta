@@ -98,6 +98,15 @@ Run only Office-31 or VisDA-C, or a budget subset:
   --datasets visda-c --budgets 0.005 --devices 0
 ```
 
+The default matrix remains `0.005,0.01,0.02`. Custom structural rho values are
+also accepted and use `floor(rho * 6912)` groups:
+
+```bash
+/home/nas3/biod/wangkangyi/envs/lbi/bin/python \
+  -m transformer.group_random matrix \
+  --datasets all --rho 0.0005 --devices 0,1
+```
+
 The matrix process displays condition-level tqdm progress. Batch-level child
 bars are stored in `logs/*.log`; use `tail -F <log>` to follow one condition.
 

@@ -71,6 +71,16 @@ GROUP_LBI_GPUS=0,1,2,3,4,5,6,7 \
   bash transformer/group_lbi/run_all.sh
 ```
 
+The default matrix remains `0.005,0.01,0.02`. A custom structural rho can be
+selected explicitly; its group count is `floor(rho * 6912)`. Custom rhos use
+the dataset's `default` LBI profile unless an exact profile exists:
+
+```bash
+/home/nas3/biod/wangkangyi/envs/lbi/bin/python \
+  -m transformer.group_lbi matrix \
+  --datasets all --rho 0.0005 --devices 0,1
+```
+
 Resume one interrupted condition from its last completed batch:
 
 ```bash

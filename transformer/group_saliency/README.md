@@ -72,6 +72,15 @@ Subset examples:
   --datasets visda-c --budgets 0.01 --devices 0
 ```
 
+The default matrix remains `0.005,0.01,0.02`. Custom structural rho values are
+also accepted and use `floor(rho * 6912)` groups:
+
+```bash
+/home/nas3/biod/wangkangyi/envs/lbi/bin/python \
+  -m transformer.group_saliency matrix \
+  --datasets all --rho 0.0005 --devices 0,1
+```
+
 ## Results
 
 The default root is:
@@ -87,4 +96,3 @@ group ids, mask hash, selected scores, block/kind counts, loss, PU, runtime, and
 GPU memory. Office aggregation is the equal-weight mean of six sample-level
 transfer accuracies. VisDA primary PU/FO values are fixed-12-class macro
 accuracies, with all class accuracies retained separately.
-
