@@ -12,7 +12,7 @@ This package implements the controlled `group_saliency` baseline specified by
 - AdamW with LR `1e-5`, betas `(0.9,0.999)`, eps `1e-8`, weight decay `0.01`;
 - only qkv/proj/fc1/fc2 weights in blocks 9, 10, and 11 are candidates;
 - 6912 global paired QK/VO/FFN groups of 768 scalars each;
-- budgets `0.005/0.01/0.02` select exactly `34/69/138` groups by floor;
+- budgets `0.0005/0.001/0.002` select exactly `3/6/13` groups by floor;
 - after every backward, score each group by the L2 norm of `abs(W * grad)` and
   refresh a global top-K mask before the single AdamW step;
 - current off-mask values are restored and their AdamW `exp_avg/exp_avg_sq`
@@ -50,7 +50,7 @@ CUDA_VISIBLE_DEVICES=0 \
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_saliency transfer \
   --dataset office31 --source amazon --target dslr \
-  --budget 0.005 --device cuda
+  --budget 0.0005 --device cuda
 ```
 
 Run all 21 conditions on eight GPUs, one process per GPU:
@@ -69,16 +69,16 @@ Subset examples:
 
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_saliency matrix \
-  --datasets visda-c --budgets 0.01 --devices 0
+  --datasets visda-c --budgets 0.001 --devices 0
 ```
 
-The default matrix remains `0.005,0.01,0.02`. Custom structural rho values are
+The default matrix is `0.0005,0.001,0.002`. Custom structural rho values are
 also accepted and use `floor(rho * 6912)` groups:
 
 ```bash
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_saliency matrix \
-  --datasets all --rho 0.0005 --devices 0,1
+  --datasets all --rho 0.005 --devices 0,1
 ```
 
 ## Results

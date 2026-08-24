@@ -7,7 +7,7 @@ import json
 import statistics
 from pathlib import Path
 
-from .config import FORMAL_BUDGETS, TRANSFERS, budget_tag
+from .config import FORMAL_BUDGETS, TRANSFERS, budget_key, budget_tag
 
 
 def _tuning_diagnostics(selection: dict) -> dict:
@@ -166,7 +166,7 @@ def aggregate_matrix(run_root: Path, *, transfers=TRANSFERS, budgets=FORMAL_BUDG
                 "utilization-mean": row["selection"]["utilization_mean"],
                 "tuning-diagnostics": _tuning_diagnostics(row["selection"]),
             }
-        result["budgets"][f"{budget:.3f}"] = budget_result
+        result["budgets"][budget_key(budget)] = budget_result
     return result
 
 
@@ -293,7 +293,7 @@ def print_aggregate(aggregate: dict) -> None:
     print("------  --------  -----------------  --------  --------  ----------")
     for row in aggregate["transfers"]:
         print(
-            f"{row['requested_budget']:<6.3f}  {row['dataset']:<8}  "
+            f"{budget_key(row['requested_budget']):<6}  {row['dataset']:<8}  "
             f"{row['transfer']:<17}  {row['PU-Acc']:8.3f}  {row['FO-Acc']:8.3f}  "
             f"{row['selection']['realized_group_count_mean']:10.2f}"
         )

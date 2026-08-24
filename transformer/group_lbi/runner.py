@@ -35,7 +35,7 @@ from transformer.source_only.runner import (
     set_reproducibility,
 )
 
-from .config import GROUP_SIZE, TOTAL_GROUPS
+from .config import GROUP_SIZE, TOTAL_GROUPS, budget_key
 from .engine import (
     GroupSplitLBIEngine,
     changed_group_ids,
@@ -442,7 +442,7 @@ def run_transfer(
             online_loader,
             desc=(
                 f"group-lbi {config['dataset']} {config['transfer']} "
-                f"rho={config['selection']['requested_budget']:.3f}"
+                f"rho={budget_key(config['selection']['requested_budget'])}"
             ),
             unit="batch",
             dynamic_ncols=True,
@@ -617,7 +617,7 @@ def run_transfer(
             fo_loader,
             desc=(
                 f"FO {config['dataset']} {config['transfer']} "
-                f"rho={config['selection']['requested_budget']:.3f}"
+                f"rho={budget_key(config['selection']['requested_budget'])}"
             ),
             unit="batch",
             dynamic_ncols=True,
@@ -771,7 +771,7 @@ def run_transfer(
         _remove_checkpoint(output_dir)
         print(
             f"[{config['dataset']} {config['transfer']} "
-            f"rho={config['selection']['requested_budget']:.3f}] "
+            f"rho={budget_key(config['selection']['requested_budget'])}] "
             f"PU-Acc={summary['PU-Acc']:.4f} FO-Acc={summary['FO-Acc']:.4f}",
             flush=True,
         )

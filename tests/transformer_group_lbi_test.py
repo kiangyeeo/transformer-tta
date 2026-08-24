@@ -77,24 +77,24 @@ def check_config_profiles_budgets_and_overrides() -> None:
     _validate_frozen_fields(config)
     assert config["formal_seed"] == FORMAL_SEED == 2026
     assert config["protocol_revision"] == PROTOCOL_REVISION
-    assert FORMAL_BUDGETS == (0.005, 0.01, 0.02)
-    assert BUDGET_TO_K == {0.005: 34, 0.01: 69, 0.02: 138}
-    assert [budget_group_count(value) for value in FORMAL_BUDGETS] == [34, 69, 138]
+    assert FORMAL_BUDGETS == (0.0005, 0.001, 0.002)
+    assert BUDGET_TO_K == {0.0005: 3, 0.001: 6, 0.002: 13}
+    assert [budget_group_count(value) for value in FORMAL_BUDGETS] == [3, 6, 13]
     assert parse_budgets("all") == FORMAL_BUDGETS
     assert parse_budgets("0.0005") == (0.0005,)
     assert budget_group_count(0.0005) == 3
     assert budget_tag(0.0005) == "rho-0.0005"
     assert budget_tag(0.01) == "rho-0.010"
-    office = resolve_lbi_profile(config, "office31", 0.005)
-    visda = resolve_lbi_profile(config, "visda-c", 0.02)
+    office = resolve_lbi_profile(config, "office31", 0.0005)
+    visda = resolve_lbi_profile(config, "visda-c", 0.002)
     assert office["status"] == visda["status"] == "provisional_default"
     assert office["alpha"] == 0.1 and office["stage2_lr"] == 1.0e-5
-    overridden = resolve_lbi_profile(config, "office31", 0.005, {"alpha": 0.2})
+    overridden = resolve_lbi_profile(config, "office31", 0.0005, {"alpha": 0.2})
     assert overridden["alpha"] == 0.2
-    assert resolve_lbi_profile(config, "office31", 0.010)["alpha"] == 0.1
-    custom = resolve_lbi_profile(config, "office31", 0.0005)
+    assert resolve_lbi_profile(config, "office31", 0.001)["alpha"] == 0.1
+    custom = resolve_lbi_profile(config, "office31", 0.005)
     assert custom["profile_key"] == "office31/default"
-    assert custom["requested_rho_key"] == "0.0005"
+    assert custom["requested_rho_key"] == "0.005"
     assert custom["alpha"] == 0.1 and custom["stage2_lr"] == 1.0e-5
 
 

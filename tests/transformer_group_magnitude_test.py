@@ -65,9 +65,9 @@ def check_config_budgets_and_identity() -> None:
     _validate_frozen_fields(config)
     assert config["formal_seed"] == FORMAL_SEED == 2026
     assert config["protocol_revision"] == PROTOCOL_REVISION
-    assert FORMAL_BUDGETS == (0.005, 0.01, 0.02)
-    assert BUDGET_TO_K == {0.005: 34, 0.01: 69, 0.02: 138}
-    assert [budget_group_count(item) for item in FORMAL_BUDGETS] == [34, 69, 138]
+    assert FORMAL_BUDGETS == (0.0005, 0.001, 0.002)
+    assert BUDGET_TO_K == {0.0005: 3, 0.001: 6, 0.002: 13}
+    assert [budget_group_count(item) for item in FORMAL_BUDGETS] == [3, 6, 13]
     assert parse_budgets("all") == FORMAL_BUDGETS
     assert parse_budgets("0.005,0.02") == (0.005, 0.02)
     assert parse_budgets("0.0005") == (0.0005,)
@@ -84,7 +84,7 @@ def check_config_budgets_and_identity() -> None:
             raise AssertionError(f"Invalid devices were accepted: {invalid}")
 
     changed = copy.deepcopy(config)
-    changed["selection"]["integer_budgets"] = [35, 70, 139]
+    changed["selection"]["integer_budgets"] = [4, 7, 14]
     try:
         _validate_frozen_fields(changed)
     except ValueError as error:
@@ -210,9 +210,9 @@ def check_group_l2_ranking_ties_and_rng() -> None:
     numpy_before = np.random.get_state()
     torch_before = torch.random.get_rng_state().clone()
     scores = compute_group_l2_scores(candidates)
-    low = select_magnitude_group_ids(scores, 0.005)
-    medium = select_magnitude_group_ids(scores, 0.01)
-    high = select_magnitude_group_ids(scores, 0.02)
+    low = select_magnitude_group_ids(scores, 0.0005)
+    medium = select_magnitude_group_ids(scores, 0.001)
+    high = select_magnitude_group_ids(scores, 0.002)
     assert random.getstate() == python_before
     assert _numpy_rng_states_equal(np.random.get_state(), numpy_before)
     assert torch.equal(torch.random.get_rng_state(), torch_before)
@@ -220,13 +220,13 @@ def check_group_l2_ranking_ties_and_rng() -> None:
     assert scores.dtype == torch.float64 and scores.device.type == "cpu"
     assert scores[0].item() == 3.0
     assert abs(scores[1].item() - (8.0**0.5)) < 1.0e-12
-    assert low[:4] == (0, 1, 2, 3)
+    assert low == (0, 1, 2)
     assert medium[: len(low)] == low
     assert high[: len(medium)] == medium
-    assert select_magnitude_group_ids(scores, 0.02) == high
-    assert len(low) == 34 and len(medium) == 69 and len(high) == 138
+    assert select_magnitude_group_ids(scores, 0.002) == high
+    assert len(low) == 3 and len(medium) == 6 and len(high) == 13
     record = magnitude_mask_record(
-        low, scores=scores, budget=0.005, checkpoint_sha256="a" * 64
+        low, scores=scores, budget=0.0005, checkpoint_sha256="a" * 64
     )
     assert record["score_vector_sha256"] == score_vector_sha256(scores)
     assert record["selected_group_ids"] == list(low)
@@ -489,8 +489,8 @@ def check_aggregate_outputs() -> None:
                 )
         aggregate = aggregate_matrix(root)
         assert aggregate["condition_count"] == 21
-        assert aggregate["budgets"]["0.005"]["office31"]["PU-Acc"] == 2.5
-        assert len(aggregate["budgets"]["0.020"]["visda-c"]["PU-Acc-per-class"]) == 12
+        assert aggregate["budgets"]["0.0005"]["office31"]["PU-Acc"] == 2.5
+        assert len(aggregate["budgets"]["0.002"]["visda-c"]["PU-Acc-per-class"]) == 12
         write_aggregate(root, aggregate)
         for name in ("aggregate.json", "results.csv", "visda_per_class.csv"):
             assert (root / name).is_file()

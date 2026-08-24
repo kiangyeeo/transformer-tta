@@ -1,6 +1,6 @@
 # DeiT-S structural-group Random SHOT-OTTA baseline frozen against AGENTS.md.
 schema_version: 1
-protocol_revision: transformer_group_random_otta_20260822_v1
+protocol_revision: transformer_group_random_otta_20260824_v2
 formal_seed: 2026
 method: shot
 variant: group_random
@@ -53,9 +53,9 @@ selection:
   group_order: block_then_qk_vo_ffn_then_coordinate
   total_groups: 6912
   group_size: 768
-  budgets: [0.005, 0.01, 0.02]
+  budgets: [0.0005, 0.001, 0.002]
   integer_rule: floor
-  integer_budgets: [34, 69, 138]
+  integer_budgets: [3, 6, 13]
   num_random_masks: 3
   mask_seeds: [202600, 202601, 202602]
   cross_budget_policy: nested_prefix_same_permutation

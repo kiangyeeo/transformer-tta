@@ -7,7 +7,7 @@ import json
 import statistics
 from pathlib import Path
 
-from .config import FORMAL_BUDGETS, TRANSFERS, budget_tag
+from .config import FORMAL_BUDGETS, TRANSFERS, budget_key, budget_tag
 
 
 def _load_summary(path: Path) -> dict:
@@ -99,7 +99,7 @@ def aggregate_matrix(run_root: Path, *, transfers=TRANSFERS, budgets=FORMAL_BUDG
                     "FO-Acc-per-class-mask-std-by-name"
                 ],
             }
-        result["budgets"][f"{budget:.3f}"] = budget_result
+        result["budgets"][budget_key(budget)] = budget_result
     return result
 
 
@@ -187,7 +187,7 @@ def print_aggregate(aggregate: dict) -> None:
     print("------  --------  -----------------  --------------------  --------------------")
     for row in aggregate["transfers"]:
         print(
-            f"{row['requested_budget']:<6.3f}  {row['dataset']:<8}  "
+            f"{budget_key(row['requested_budget']):<6}  {row['dataset']:<8}  "
             f"{row['transfer']:<17}  {row['PU-Acc']:7.3f}±{row['PU-Acc-mask-std']:<7.3f}  "
             f"{row['FO-Acc']:7.3f}±{row['FO-Acc-mask-std']:<7.3f}"
         )
@@ -204,4 +204,3 @@ def print_aggregate(aggregate: dict) -> None:
                 f"rho={budget} VisDA fixed-12 macro: "
                 f"PU={visda['PU-Acc']:.3f}, FO={visda['FO-Acc']:.3f}"
             )
-

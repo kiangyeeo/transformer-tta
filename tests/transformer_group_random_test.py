@@ -66,9 +66,9 @@ def check_config_budgets_and_identity() -> None:
     _validate_frozen_fields(config)
     assert config["formal_seed"] == FORMAL_SEED == 2026
     assert config["protocol_revision"] == PROTOCOL_REVISION
-    assert FORMAL_BUDGETS == (0.005, 0.01, 0.02)
-    assert BUDGET_TO_K == {0.005: 34, 0.01: 69, 0.02: 138}
-    assert [budget_group_count(item) for item in FORMAL_BUDGETS] == [34, 69, 138]
+    assert FORMAL_BUDGETS == (0.0005, 0.001, 0.002)
+    assert BUDGET_TO_K == {0.0005: 3, 0.001: 6, 0.002: 13}
+    assert [budget_group_count(item) for item in FORMAL_BUDGETS] == [3, 6, 13]
     assert parse_budgets("all") == FORMAL_BUDGETS
     assert parse_budgets("0.005,0.02") == (0.005, 0.02)
     assert parse_budgets("0.0005") == (0.0005,)
@@ -86,7 +86,7 @@ def check_config_budgets_and_identity() -> None:
             raise AssertionError(f"Invalid devices were accepted: {invalid}")
 
     changed = copy.deepcopy(config)
-    changed["selection"]["integer_budgets"] = [35, 70, 139]
+    changed["selection"]["integer_budgets"] = [4, 7, 14]
     try:
         _validate_frozen_fields(changed)
     except ValueError as error:
@@ -192,17 +192,17 @@ def check_structural_groups_and_masks() -> None:
 
 def check_random_exact_k_reproduction_and_nesting() -> None:
     for seed in MASK_SEEDS:
-        low = selected_group_ids(0.005, seed)
-        medium = selected_group_ids(0.01, seed)
-        high = selected_group_ids(0.02, seed)
-        assert len(low) == 34 and len(set(low)) == 34
-        assert len(medium) == 69 and len(set(medium)) == 69
-        assert len(high) == 138 and len(set(high)) == 138
+        low = selected_group_ids(0.0005, seed)
+        medium = selected_group_ids(0.001, seed)
+        high = selected_group_ids(0.002, seed)
+        assert len(low) == 3 and len(set(low)) == 3
+        assert len(medium) == 6 and len(set(medium)) == 6
+        assert len(high) == 13 and len(set(high)) == 13
         assert medium[: len(low)] == low
         assert high[: len(medium)] == medium
-        assert selected_group_ids(0.02, seed) == high
-        assert mask_sha256(high) == mask_sha256(selected_group_ids(0.02, seed))
-    supports = [set(selected_group_ids(0.02, seed)) for seed in MASK_SEEDS]
+        assert selected_group_ids(0.002, seed) == high
+        assert mask_sha256(high) == mask_sha256(selected_group_ids(0.002, seed))
+    supports = [set(selected_group_ids(0.002, seed)) for seed in MASK_SEEDS]
     assert len({tuple(sorted(value)) for value in supports}) == 3
 
 
@@ -476,8 +476,8 @@ def check_aggregate_outputs() -> None:
         aggregate = aggregate_matrix(root)
         assert aggregate["condition_count"] == 21
         assert aggregate["child_run_count"] == 63
-        assert aggregate["budgets"]["0.005"]["office31"]["PU-Acc"] == 2.5
-        assert len(aggregate["budgets"]["0.020"]["visda-c"]["PU-Acc-per-class"]) == 12
+        assert aggregate["budgets"]["0.0005"]["office31"]["PU-Acc"] == 2.5
+        assert len(aggregate["budgets"]["0.002"]["visda-c"]["PU-Acc-per-class"]) == 12
         write_aggregate(root, aggregate)
         for name in ("aggregate.json", "results.csv", "mask_results.csv", "visda_per_class.csv"):
             assert (root / name).is_file()

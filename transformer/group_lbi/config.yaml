@@ -1,6 +1,6 @@
 # Provisional Group Split-LBI profiles. Retune and freeze before formal reporting.
 schema_version: 1
-protocol_revision: transformer_group_lbi_otta_20260822_v1
+protocol_revision: transformer_group_lbi_otta_20260824_v2
 formal_seed: 2026
 method: shot
 variant: group_lbi
@@ -53,9 +53,9 @@ selection:
   group_order: block_then_qk_vo_ffn_then_coordinate
   total_groups: 6912
   group_size: 768
-  budgets: [0.005, 0.01, 0.02]
+  budgets: [0.0005, 0.001, 0.002]
   integer_rule: floor
-  integer_budgets: [34, 69, 138]
+  integer_budgets: [3, 6, 13]
   support_measure: gamma_group_l2_div_sqrt_group_size
   strict_rollback: true
   topk_trim: false
@@ -105,7 +105,7 @@ diagnostics:
 
 lbi_profiles:
   office31:
-    "0.005": &provisional
+    "0.0005": &provisional
       status: provisional_default
       parameters:
         alpha: 0.1
@@ -117,13 +117,13 @@ lbi_profiles:
         stage1_max_steps: 3000
         stage2_lr: 1.0e-5
     default: *provisional
-    "0.010": *provisional
-    "0.020": *provisional
+    "0.001": *provisional
+    "0.002": *provisional
   visda-c:
     default: *provisional
-    "0.005": *provisional
-    "0.010": *provisional
-    "0.020": *provisional
+    "0.0005": *provisional
+    "0.001": *provisional
+    "0.002": *provisional
 
 output:
   root: /home/nas3/biod/wangkangyi/results/transformer_otta_group_lbi

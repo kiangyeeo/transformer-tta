@@ -1,6 +1,6 @@
 # DeiT-S dynamic structural-group Saliency SHOT-OTTA baseline.
 schema_version: 1
-protocol_revision: transformer_group_saliency_otta_20260822_v1
+protocol_revision: transformer_group_saliency_otta_20260824_v2
 formal_seed: 2026
 method: shot
 variant: group_saliency
@@ -57,9 +57,9 @@ selection:
   group_order: block_then_qk_vo_ffn_then_coordinate
   total_groups: 6912
   group_size: 768
-  budgets: [0.005, 0.01, 0.02]
+  budgets: [0.0005, 0.001, 0.002]
   integer_rule: floor
-  integer_budgets: [34, 69, 138]
+  integer_budgets: [3, 6, 13]
   ranking_source: current_pre_update_weight_and_current_shot_gradient
   mask_refresh_policy: every_online_batch_after_backward_before_step
 
@@ -83,4 +83,3 @@ runtime:
 
 output:
   root: /home/nas3/biod/wangkangyi/results/transformer_otta_group_saliency
-

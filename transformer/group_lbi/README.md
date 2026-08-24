@@ -11,7 +11,7 @@ It runs Group Split-LBI on the six Office-31 transfers and VisDA-C
 - causal current-batch SHOT objective `0.3*pseudo + ent + div`;
 - only qkv/proj/fc1/fc2 weights in blocks 9, 10, and 11 are candidates;
 - 6912 paired QK/VO/FFN groups, each containing 768 unique scalars;
-- floor budgets `0.005/0.010/0.020 -> K=34/69/138`;
+- floor budgets `0.0005/0.001/0.002 -> K=3/6/13`;
 - normalized group support `||gamma_g||_2/sqrt(768) >= tau_g`;
 - corrected old-state Split-LBI update and strict last-feasible rollback;
 - realized support is allowed to remain below K and is never filled or trimmed;
@@ -50,7 +50,7 @@ CUDA_VISIBLE_DEVICES=0 \
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_lbi transfer \
   --dataset office31 --source amazon --target dslr \
-  --budget 0.005 --device cuda
+  --budget 0.0005 --device cuda
 ```
 
 Temporarily override a selected dataset/budget profile for tuning:
@@ -58,7 +58,7 @@ Temporarily override a selected dataset/budget profile for tuning:
 ```bash
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_lbi matrix \
-  --datasets office31 --budgets 0.005 --devices 0,1,2,3,4,5 \
+  --datasets office31 --budgets 0.0005 --devices 0,1,2,3,4,5 \
   --lbi-alpha 0.2 --lbi-kappa 1.0 --lbi-nu 0.5 \
   --lbi-omega 0.1 --lbi-prox-lambda 1.0 --lbi-tau-g 1e-4 \
   --lbi-stage1-max-steps 3000 --lbi-stage2-lr 1e-5
@@ -71,14 +71,14 @@ GROUP_LBI_GPUS=0,1,2,3,4,5,6,7 \
   bash transformer/group_lbi/run_all.sh
 ```
 
-The default matrix remains `0.005,0.01,0.02`. A custom structural rho can be
+The default matrix is `0.0005,0.001,0.002`. A custom structural rho can be
 selected explicitly; its group count is `floor(rho * 6912)`. Custom rhos use
 the dataset's `default` LBI profile unless an exact profile exists:
 
 ```bash
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_lbi matrix \
-  --datasets all --rho 0.0005 --devices 0,1
+  --datasets all --rho 0.005 --devices 0,1
 ```
 
 Resume one interrupted condition from its last completed batch:

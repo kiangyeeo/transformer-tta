@@ -19,10 +19,11 @@ from transformer.source_only.config import (
     TRANSFERS,
     canonical_sha256,
 )
+from transformer.structural_budget import format_structural_budget
 
 
-PROTOCOL_REVISION = "transformer_group_random_otta_20260822_v1"
-FORMAL_BUDGETS = (0.005, 0.01, 0.02)
+PROTOCOL_REVISION = "transformer_group_random_otta_20260824_v2"
+FORMAL_BUDGETS = (0.0005, 0.001, 0.002)
 TOTAL_GROUPS = 6_912
 GROUP_SIZE = 768
 NUM_RANDOM_MASKS = 3
@@ -32,9 +33,11 @@ BUDGET_TO_K = {budget: math.floor(budget * TOTAL_GROUPS) for budget in FORMAL_BU
 
 def budget_tag(budget: float) -> str:
     value = normalize_budget(budget)
-    if value in FORMAL_BUDGETS:
-        return f"rho-{value:.3f}"
-    return f"rho-{value:.12g}"
+    return f"rho-{format_structural_budget(value)}"
+
+
+def budget_key(budget: float | str) -> str:
+    return format_structural_budget(normalize_budget(budget))
 
 
 def normalize_budget(value: float | str) -> float:

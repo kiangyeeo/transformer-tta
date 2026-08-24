@@ -1,7 +1,7 @@
 # AGENTS.md — Transformer SHOT-OTTA + Group Split-LBI Working Protocol
 
 > **Status:** current working specification for the Transformer branch  
-> **Last updated:** 2026-08-22  
+> **Last updated:** 2026-08-24
 > **Scope:** DeiT-Small + SHOT-OTTA + structural-group sparse adaptation on Office-31 and VisDA-C  
 > **Purpose:** repository-level instructions for Codex/agents and developers.  
 > This file supersedes older Transformer notes when they conflict with the rules below.  
@@ -536,16 +536,13 @@ The timm `qkv.weight` remains physically fused with shape `[3d, d]`. Q/K/V are l
 
 ## 12. Current formal sparse budgets
 
-Do **not** copy the FC ratios `{0.0005, 0.001, 0.002}` directly.
-
-FC uses scalar-level support; the Transformer track uses 6912 structural groups and therefore needs a coarser useful structural range.
-
-Current Transformer formal budget proposal:
+Following the completed Transformer pilot and the explicit 2026-08-24 protocol
+revision, the current Transformer formal budgets are:
 
 \[
 \rho_{\mathrm{struct}}
 \in
-\{0.005,\ 0.01,\ 0.02\}.
+\{0.0005,\ 0.001,\ 0.002\}.
 \]
 
 Use the strict integer rule:
@@ -562,9 +559,9 @@ Thus:
 
 | rho | K groups | active candidate scalars |
 |---:|---:|---:|
-| 0.005 | 34 | 26,112 |
-| 0.010 | 69 | 52,992 |
-| 0.020 | 138 | 105,984 |
+| 0.0005 | 3 | 2,304 |
+| 0.0010 | 6 | 4,608 |
+| 0.0020 | 13 | 9,984 |
 
 No `ceil`.
 
@@ -1323,7 +1320,9 @@ Old Stage-2 dense-delta initialization is superseded by masked-delta initializat
 
 Any sparse path that only masks gradients but allows AdamW off-mask drift is superseded.
 
-Old tiny formal budgets around `7 / 21 / 35` groups are superseded by the current proposed formal range `34 / 69 / 138` groups unless a new predeclared pilot/protocol revision changes them.
+The previous Transformer proposal `0.005 / 0.01 / 0.02` with
+`34 / 69 / 138` groups is superseded by the explicit 2026-08-24 revision to
+`0.0005 / 0.001 / 0.002` with `3 / 6 / 13` groups.
 
 ---
 
@@ -1338,7 +1337,7 @@ At minimum add/maintain tests for:
 5. QK paired masking;
 6. VO paired masking;
 7. FFN paired masking;
-8. exact floor budget `34 / 69 / 138`;
+8. exact floor budget `3 / 6 / 13`;
 9. Random exact-K selection;
 10. deterministic three-mask reproduction;
 11. Magnitude top-K by group L2;
@@ -1409,8 +1408,8 @@ Before launching the new Transformer baseline matrix, verify all boxes:
 [ ] head frozen for controlled family
 [ ] 6912 paired groups validated
 [ ] budget uses floor
-[ ] formal budgets = 0.005 / 0.01 / 0.02
-[ ] K = 34 / 69 / 138
+[ ] formal budgets = 0.0005 / 0.001 / 0.002
+[ ] K = 3 / 6 / 13
 [ ] Candidate-dense / Random / Magnitude / Saliency share AdamW config
 [ ] Random uses three deterministic child masks
 [ ] Magnitude uses W0 group L2

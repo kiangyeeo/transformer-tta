@@ -28,7 +28,7 @@ from transformer.source_only.runner import (
 )
 
 from .data import build_target_loaders
-from .config import TOTAL_GROUPS
+from .config import TOTAL_GROUPS, budget_key
 from .groups import (
     build_masks,
     compute_group_saliency_scores,
@@ -171,7 +171,7 @@ def run_transfer(
             online_loader,
             desc=(
                 f"saliency {config['dataset']} {config['transfer']} "
-                f"rho={config['selection']['requested_budget']:.3f}"
+                f"rho={budget_key(config['selection']['requested_budget'])}"
             ),
             unit="batch",
             dynamic_ncols=True,
@@ -323,7 +323,7 @@ def run_transfer(
             fo_loader,
             desc=(
                 f"FO {config['dataset']} {config['transfer']} "
-                f"rho={config['selection']['requested_budget']:.3f}"
+                f"rho={budget_key(config['selection']['requested_budget'])}"
             ),
             unit="batch",
             dynamic_ncols=True,
@@ -495,7 +495,7 @@ def run_transfer(
         )
         print(
             f"[{config['dataset']} {config['transfer']} "
-            f"rho={config['selection']['requested_budget']:.3f}] "
+            f"rho={budget_key(config['selection']['requested_budget'])}] "
             f"PU-Acc={summary['PU-Acc']:.4f} FO-Acc={summary['FO-Acc']:.4f}",
             flush=True,
         )

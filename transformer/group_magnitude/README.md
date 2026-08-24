@@ -14,7 +14,7 @@ checkpoints for all six Office-31 transfers and VisDA-C `train -> validation`.
 - model remains in eval mode and the classifier/head stays frozen;
 - candidate weights are only qkv/proj/fc1/fc2 in blocks 9, 10, and 11;
 - 6912 global paired structural groups, each with exactly 768 scalars;
-- budgets `0.005/0.01/0.02` use floor and select exactly `34/69/138` groups;
+- budgets `0.0005/0.001/0.002` use floor and select exactly `3/6/13` groups;
 - group scores are paired-group L2 norms computed once from source W0 on CPU
   in float64; stable ties are resolved by ascending canonical group id;
 - the top-K structural mask is static for the complete target stream;
@@ -67,7 +67,7 @@ Validate one condition and print its resolved config:
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_magnitude transfer \
   --dataset office31 --source amazon --target dslr \
-  --budget 0.005 --device cuda --dry-run
+  --budget 0.0005 --device cuda --dry-run
 ```
 
 ## Formal commands
@@ -79,7 +79,7 @@ CUDA_VISIBLE_DEVICES=0 \
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_magnitude transfer \
   --dataset office31 --source amazon --target dslr \
-  --budget 0.005 --device cuda
+  --budget 0.0005 --device cuda
 ```
 
 Run all 21 conditions on eight GPUs, one experiment process per GPU:
@@ -103,17 +103,17 @@ Run only Office-31, only VisDA-C, or a budget subset:
 
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_magnitude matrix \
-  --datasets all --budgets 0.005,0.02 \
+  --datasets all --budgets 0.0005,0.002 \
   --devices 0,1,2,3,4,5,6,7
 ```
 
-The default matrix remains `0.005,0.01,0.02`. Custom structural rho values are
+The default matrix is `0.0005,0.001,0.002`. Custom structural rho values are
 also accepted and use `floor(rho * 6912)` groups:
 
 ```bash
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_magnitude matrix \
-  --datasets all --rho 0.0005 --devices 0,1
+  --datasets all --rho 0.005 --devices 0,1
 ```
 
 The matrix process displays condition-level tqdm progress. Each subprocess's

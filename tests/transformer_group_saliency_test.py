@@ -63,8 +63,8 @@ def check_config_budgets_and_identity() -> None:
     _validate_frozen_fields(config)
     assert config["formal_seed"] == FORMAL_SEED == 2026
     assert config["protocol_revision"] == PROTOCOL_REVISION
-    assert FORMAL_BUDGETS == (0.005, 0.01, 0.02)
-    assert BUDGET_TO_K == {0.005: 34, 0.01: 69, 0.02: 138}
+    assert FORMAL_BUDGETS == (0.0005, 0.001, 0.002)
+    assert BUDGET_TO_K == {0.0005: 3, 0.001: 6, 0.002: 13}
     assert parse_budgets("all") == FORMAL_BUDGETS
     assert parse_budgets("0.005,0.02") == (0.005, 0.02)
     assert parse_budgets("0.0005") == (0.0005,)
@@ -80,7 +80,7 @@ def check_config_budgets_and_identity() -> None:
         else:
             raise AssertionError(f"Invalid devices were accepted: {invalid}")
     changed = copy.deepcopy(config)
-    changed["selection"]["integer_budgets"] = [35, 70, 139]
+    changed["selection"]["integer_budgets"] = [4, 7, 14]
     try:
         _validate_frozen_fields(changed)
     except ValueError:
@@ -508,8 +508,8 @@ def check_aggregate_outputs() -> None:
                 )
         aggregate = aggregate_matrix(root)
         assert aggregate["condition_count"] == 21
-        assert aggregate["budgets"]["0.005"]["office31"]["PU-Acc"] == 2.5
-        assert len(aggregate["budgets"]["0.020"]["visda-c"]["PU-Acc-per-class"]) == 12
+        assert aggregate["budgets"]["0.0005"]["office31"]["PU-Acc"] == 2.5
+        assert len(aggregate["budgets"]["0.002"]["visda-c"]["PU-Acc-per-class"]) == 12
         write_aggregate(root, aggregate)
         for name in ("aggregate.json", "results.csv", "visda_per_class.csv"):
             assert (root / name).is_file()

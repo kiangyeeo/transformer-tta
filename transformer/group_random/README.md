@@ -14,8 +14,8 @@ transfers and VisDA-C `train -> validation`.
 - model remains in eval mode and the head stays frozen;
 - candidate weights are only qkv/proj/fc1/fc2 in blocks 9, 10, and 11;
 - 6912 global paired structural groups, each with 768 scalars;
-- budgets `0.005/0.01/0.02` use floor and therefore select exactly
-  `34/69/138` groups;
+- budgets `0.0005/0.001/0.002` use floor and therefore select exactly
+  `3/6/13` groups;
 - three child masks use seeds `202600/202601/202602`;
 - each seed uses one fixed permutation, so its support is nested across budgets;
 - off-mask values and AdamW `exp_avg/exp_avg_sq` remain exactly zero/frozen;
@@ -46,7 +46,7 @@ Validate one condition:
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_random transfer \
   --dataset office31 --source amazon --target dslr \
-  --budget 0.005 --device cuda --dry-run
+  --budget 0.0005 --device cuda --dry-run
 ```
 
 ## Recommended execution sequence
@@ -72,7 +72,7 @@ CUDA_VISIBLE_DEVICES=0 \
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_random transfer \
   --dataset office31 --source amazon --target dslr \
-  --budget 0.005 --device cuda
+  --budget 0.0005 --device cuda
 ```
 
 Run all 21 transfer/budget conditions (63 child masks), with one process per
@@ -90,21 +90,21 @@ Run only Office-31 or VisDA-C, or a budget subset:
 ```bash
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_random matrix \
-  --datasets office31 --budgets 0.005,0.01,0.02 \
+  --datasets office31 --budgets 0.0005,0.001,0.002 \
   --devices 0,1,2,3,4,5,6,7
 
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_random matrix \
-  --datasets visda-c --budgets 0.005 --devices 0
+  --datasets visda-c --budgets 0.0005 --devices 0
 ```
 
-The default matrix remains `0.005,0.01,0.02`. Custom structural rho values are
+The default matrix is `0.0005,0.001,0.002`. Custom structural rho values are
 also accepted and use `floor(rho * 6912)` groups:
 
 ```bash
 /home/nas3/biod/wangkangyi/envs/lbi/bin/python \
   -m transformer.group_random matrix \
-  --datasets all --rho 0.0005 --devices 0,1
+  --datasets all --rho 0.005 --devices 0,1
 ```
 
 The matrix process displays condition-level tqdm progress. Batch-level child

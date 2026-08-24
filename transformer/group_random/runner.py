@@ -28,7 +28,7 @@ from transformer.source_only.runner import (
     set_reproducibility,
 )
 
-from .config import MASK_SEEDS, NUM_RANDOM_MASKS
+from .config import MASK_SEEDS, NUM_RANDOM_MASKS, budget_key
 from .data import build_target_loaders
 from .groups import (
     build_masks,
@@ -210,7 +210,7 @@ def run_mask_child(
             online_loader,
             desc=(
                 f"random {config['dataset']} {config['transfer']} "
-                f"rho={config['selection']['requested_budget']:.3f} "
+                f"rho={budget_key(config['selection']['requested_budget'])} "
                 f"mask={config['random_mask_index']}"
             ),
             unit="batch",
@@ -341,7 +341,7 @@ def run_mask_child(
             fo_loader,
             desc=(
                 f"FO {config['dataset']} {config['transfer']} "
-                f"rho={config['selection']['requested_budget']:.3f} "
+                f"rho={budget_key(config['selection']['requested_budget'])} "
                 f"mask={config['random_mask_index']}"
             ),
             unit="batch",
@@ -496,7 +496,7 @@ def run_mask_child(
         )
         print(
             f"[{config['dataset']} {config['transfer']} "
-            f"rho={config['selection']['requested_budget']:.3f} "
+            f"rho={budget_key(config['selection']['requested_budget'])} "
             f"mask={config['random_mask_index']}] "
             f"PU-Acc={summary['PU-Acc']:.4f} FO-Acc={summary['FO-Acc']:.4f}",
             flush=True,
@@ -675,7 +675,7 @@ def run_transfer(
         )
         print(
             f"[{config['dataset']} {config['transfer']} "
-            f"rho={config['selection']['requested_budget']:.3f}] "
+            f"rho={budget_key(config['selection']['requested_budget'])}] "
             f"Random mean PU={summary['PU-Acc']:.4f}±{summary['PU-Acc-mask-std']:.4f} "
             f"FO={summary['FO-Acc']:.4f}±{summary['FO-Acc-mask-std']:.4f}",
             flush=True,
