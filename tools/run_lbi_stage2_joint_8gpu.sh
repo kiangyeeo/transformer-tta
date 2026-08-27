@@ -78,10 +78,10 @@ add_office 0.001  "A6 A4 A8"
 add_office 0.002  "A2 A3"
 add_visda  0.0005 "A5 A6"
 add_visda  0.001  "A5 A3"
-add_visda  0.002  "A5 A3 A4"
+add_visda  0.002  "A5"
 
-if [[ "$job_count" -ne 660 ]]; then
-  echo "Internal error: expected 660 jobs, generated $job_count" >&2
+if [[ "$job_count" -ne 636 ]]; then
+  echo "Internal error: expected 636 jobs, generated $job_count" >&2
   exit 1
 fi
 
