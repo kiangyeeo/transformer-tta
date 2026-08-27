@@ -65,6 +65,8 @@ def _load_summary(path: Path) -> dict:
         summary = json.load(file_obj)
     if summary.get("status") != "completed":
         raise ValueError(f"Group-LBI condition is not completed: {path}")
+    if summary.get("valid_lbi_run") is False:
+        raise ValueError(f"Group-LBI condition is scientifically invalid: {path}")
     if summary.get("variant") != "group_lbi":
         raise ValueError(f"Condition is not Group-LBI: {path}")
     selection = summary.get("selection", {})

@@ -503,6 +503,70 @@ def run_transfer(
             if _classifier_hash(model) != classifier_hash_before:
                 raise RuntimeError("Frozen classifier changed during Group-LBI")
 
+            if step_record["stage1_steps_completed"] == 3000:
+                histories["adapt_runtimes"].append(adapt_runtime)
+                histories["stage1_runtimes"].append(
+                    float(timing.values.get("lbi_stage1", 0.0))
+                )
+                histories["stage2_runtimes"].append(
+                    float(timing.values.get("lbi_stage2", 0.0))
+                )
+                histories["step_records"].append(step_record)
+                selection_summary = _selection_summary(
+                    histories["step_records"],
+                    stage1_step_cap=int(config["lbi"]["stage1_max_steps"]),
+                )
+                completed_at = _utc_now()
+                invalid_summary = {
+                    **base_manifest,
+                    "status": "completed",
+                    "valid_lbi_run": False,
+                    "result_validity": "invalid",
+                    "invalid_reason": "stage1_3000_step_hit",
+                    "terminated_early": True,
+                    "termination_batch_index": batch_index,
+                    "completed_online_batch_count": completed_batches,
+                    "selection": {
+                        **copy.deepcopy(config["selection"]),
+                        **selection_summary,
+                    },
+                    "stream": stream_record,
+                    "completed_at_utc": completed_at,
+                    "wall_runtime_sec": float(
+                        prior_wall_runtime + time.perf_counter() - segment_started
+                    ),
+                    "output_dir": str(output_dir),
+                }
+                _append_jsonl(
+                    paths["metrics"],
+                    {
+                        "schema_version": ARTIFACT_SCHEMA_VERSION,
+                        "event": "experiment_invalidated",
+                        "batch_index": batch_index,
+                        "reason": "stage1_3000_step_hit",
+                        **step_record,
+                    },
+                )
+                _atomic_json(paths["summary"], invalid_summary)
+                _atomic_json(
+                    paths["manifest"],
+                    {
+                        **invalid_summary,
+                        "adapted_model_saved": False,
+                        "stream_checkpoint_removed_after_completion": bool(
+                            config["checkpointing"]["enabled"]
+                        ),
+                    },
+                )
+                _remove_checkpoint(output_dir)
+                progress.close()
+                print(
+                    f"[{config['dataset']} {config['transfer']}] invalid: "
+                    f"batch {batch_index} hit 3000 Stage-1 steps; stopping early",
+                    flush=True,
+                )
+                return invalid_summary
+
             pu_started = time.perf_counter()
             failure_context["phase"] = "online_pu"
             with torch.inference_mode():
@@ -683,6 +747,8 @@ def run_transfer(
         summary = {
             "schema_version": ARTIFACT_SCHEMA_VERSION,
             "status": "completed",
+            "valid_lbi_run": True,
+            "result_validity": "valid",
             "protocol_revision": config["protocol_revision"],
             "method": "shot",
             "variant": "group_lbi",

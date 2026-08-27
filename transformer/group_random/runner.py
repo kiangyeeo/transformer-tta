@@ -189,7 +189,7 @@ def run_mask_child(
             weight_decay=float(optimization["weight_decay"]),
         )
         online_loader, fo_loader, stream_record = build_target_loaders(config)
-        if online_loader.batch_size != config["batch_size"]:
+        if online_loader.batch_size not in (None, config["batch_size"]):
             raise RuntimeError("Online loader batch size differs from frozen config")
         if fo_loader.batch_size != config["fo_batch_size"]:
             raise RuntimeError("FO loader batch size differs from frozen config")

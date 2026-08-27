@@ -247,7 +247,10 @@ no full-target noncausal pseudo-label clustering
 
 Keep `drop_last = false`.
 
-The tail batch, including size-one tail batches, must be retained.
+The tail batch must be retained. For Office-31 transfers whose target is Amazon,
+the 2,817-sample stream's singleton tail is merged into the preceding online
+batch, producing a final online batch of 65 samples. Other Office transfers and
+VisDA-C retain ordinary `drop_last=false` batching.
 
 Target labels must never enter adaptation.
 
@@ -1091,6 +1094,10 @@ support never grows
 support instantly explodes
 very poor utilization
 ```
+
+If any online batch reaches exactly 3000 Stage-1 steps, terminate that LBI run
+immediately, record `valid_lbi_run=false`, `result_validity=invalid`, and
+`invalid_reason=stage1_3000_step_hit`, and do not process later batches or FO.
 
 ### Phase B — persistent/refinement interaction
 

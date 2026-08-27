@@ -67,6 +67,10 @@ from transformer.group_random.optimizer import (  # noqa: E402
     strict_masked_adamw_step,
 )
 from transformer.source_only.metrics import FixedClassMeter  # noqa: E402
+from transformer.source_only.data import (  # noqa: E402
+    FixedOrderSampler,
+    MergeSingletonTailBatchSampler,
+)
 
 
 CONFIG_PATH = PROJECT_ROOT / "transformer" / "group_lbi" / "config.yaml"
@@ -398,6 +402,22 @@ def check_metrics_keep_tail_and_fixed_classes() -> None:
     assert result["overall-Acc"] == 1200.0 / 13.0
 
 
+def check_office_amazon_singleton_tail_batching() -> None:
+    sampler = MergeSingletonTailBatchSampler(
+        FixedOrderSampler(range(2817)), batch_size=64, drop_last=False
+    )
+    sizes = [len(batch) for batch in sampler]
+    assert len(sampler) == len(sizes) == 44
+    assert sizes[:-1] == [64] * 43
+    assert sizes[-1] == 65
+    assert sorted(index for batch in sampler for index in batch) == list(range(2817))
+
+    ordinary = MergeSingletonTailBatchSampler(
+        FixedOrderSampler(range(2816)), batch_size=64, drop_last=False
+    )
+    assert [len(batch) for batch in ordinary] == [64] * 44
+
+
 def check_tuning_diagnostics() -> None:
     records = []
     for index, (selected, steps, rollback) in enumerate(
@@ -521,6 +541,7 @@ def main() -> None:
     check_identity_changes_with_lbi_profile()
     check_checkpoint_roundtrip_and_metric_truncation()
     check_metrics_keep_tail_and_fixed_classes()
+    check_office_amazon_singleton_tail_batching()
     check_tuning_diagnostics()
     print("Transformer Group-LBI tests passed")
 

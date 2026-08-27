@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import BatchSampler, DataLoader, Dataset, Sampler
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
@@ -67,6 +67,21 @@ class FixedOrderSampler(Sampler[int]):
 
     def __len__(self) -> int:
         return len(self.indices)
+
+
+class MergeSingletonTailBatchSampler(BatchSampler):
+    """Keep every sample while folding a size-one tail into the prior batch."""
+
+    def __iter__(self):
+        batches = list(super().__iter__())
+        if len(batches) >= 2 and len(batches[-1]) == 1:
+            batches[-2].extend(batches.pop())
+        yield from batches
+
+    def __len__(self) -> int:
+        batch_count = super().__len__()
+        has_singleton_tail = len(self.sampler) % self.batch_size == 1
+        return batch_count - 1 if batch_count >= 2 and has_singleton_tail else batch_count
 
 
 def _seed_worker(worker_id: int) -> None:
@@ -127,19 +142,31 @@ def _loader(
     workers: int,
     worker_seed: int,
     pin_memory: bool,
+    merge_singleton_tail: bool = False,
 ) -> DataLoader:
     generator = torch.Generator()
     generator.manual_seed(int(worker_seed))
-    return DataLoader(
-        dataset,
-        batch_size=int(batch_size),
-        sampler=FixedOrderSampler(order),
+    sampler = FixedOrderSampler(order)
+    common = dict(
+        dataset=dataset,
         num_workers=int(workers),
-        drop_last=False,
         pin_memory=bool(pin_memory),
         persistent_workers=False,
         worker_init_fn=_seed_worker,
         generator=generator,
+    )
+    if merge_singleton_tail:
+        return DataLoader(
+            **common,
+            batch_sampler=MergeSingletonTailBatchSampler(
+                sampler, batch_size=int(batch_size), drop_last=False
+            ),
+        )
+    return DataLoader(
+        **common,
+        batch_size=int(batch_size),
+        sampler=sampler,
+        drop_last=False,
     )
 
 
@@ -154,6 +181,11 @@ def build_target_loaders(config: dict):
         config["runtime"]["pin_memory"]
         and config["runtime"]["device"] == "cuda"
     )
+    merge_singleton_tail = (
+        config["dataset"] == "office31"
+        and config["target"].lower() == "amazon"
+        and len(records) % int(config["batch_size"]) == 1
+    )
     online_loader = _loader(
         online_dataset,
         order=online_order,
@@ -161,6 +193,7 @@ def build_target_loaders(config: dict):
         workers=config["workers"],
         worker_seed=config["formal_seed"] + 1,
         pin_memory=pin_memory,
+        merge_singleton_tail=merge_singleton_tail,
     )
     fo_loader = _loader(
         fo_dataset,
@@ -179,6 +212,7 @@ def build_target_loaders(config: dict):
         "fo_batch_count": len(fo_loader),
         "fo_batch_size": int(config["fo_batch_size"]),
         "drop_last": False,
+        "singleton_tail_merged_into_previous_batch": merge_singleton_tail,
         "online_order_sha256": _order_sha256(online_order),
         "fo_sampler": "sequential",
         "fo_order_sha256": _order_sha256(fo_order),
