@@ -13,7 +13,8 @@ This package implements the controlled `group_saliency` baseline specified by
 - only qkv/proj/fc1/fc2 weights in blocks 9, 10, and 11 are candidates;
 - 6912 global paired QK/VO/FFN groups of 768 scalars each;
 - budgets `0.0005/0.001/0.002` select exactly `3/6/13` groups by floor;
-- after every backward, score each group by the L2 norm of `abs(W * grad)` and
+- after every backward, score each paired group by the paired-group L2 norm of
+  `(weight * gradient)` and
   refresh a global top-K mask before the single AdamW step;
 - current off-mask values are restored and their AdamW `exp_avg/exp_avg_sq`
   states are cleared; historical parameter updates are not reverted;
