@@ -1,0 +1,71 @@
+# COME Office LBI tuning only. This is never a formal result configuration.
+method: COME
+task: otta
+formal_protocol: false
+tuning: true
+protocol_track: come_sparse_lbi
+protocol_revision: OTTA_COME_LBI_PROTOCOL_20260907_v1
+implementation_revision: come_otta_sparse_lbi_20260908_v3
+source_checkpoint_revision: nips2026_shot_otta_uda_source_v1
+seed: 2026
+variant: come_fc_lbi
+requested_budget: 0.0005
+group_mode: null
+selection_seed: null
+num_random_masks: null
+
+device:
+  gpu_id: "0"
+
+data:
+  dataset: office
+  root: /inspire/hdd/global_user/gaoyachen-253308310317/dataset/dataset-luojianlan
+  source: 1
+  target: 0
+  da: uda
+  batch_size: 64
+  workers: 4
+
+model:
+  backbone: resnet50
+  bottleneck_dim: 256
+  bottleneck_type: bn
+  classifier_type: wn
+
+source_checkpoint:
+  root: /inspire/hdd/global_user/gaoyachen-253308310317/PJ/Split-LBI/nips2026/SHOT-OTTA/ckpt/source
+
+optimization:
+  optimizer: sgd
+  lr: 0.01
+  lr_decay1: 0.1
+  lr_decay2: 1.0
+  momentum: 0.9
+  weight_decay: 0.001
+  nesterov: true
+  lr_gamma: 10.0
+  lr_power: 0.75
+
+come:
+  p: 2.0
+  tau: 1.0
+  opinion_eps: 1.0e-7
+  official_commit: 409a19b71f62c765b1a5be62347a9455524ec176
+
+# Launcher overrides only these five registered tunables.
+lbi:
+  alpha: 0.05
+  kappa: 1.0
+  nu: 0.25
+  omega: 0.025
+  stage2_lr: 0.005
+
+runtime:
+  debug_max_outer_batches: null
+  workers_per_gpu: null
+  runtime_comparable: false
+
+output:
+  root: 260817_iclr2027-refined/experiment_logs/come_office_lbi_tuning_20260908/runs
+  run_name: null
+  save_model: false

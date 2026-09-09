@@ -1,0 +1,91 @@
+# DEBUG/CONTRACT ONLY; formal NCTTA sparse/LBI remains blocked.
+method: NCTTA
+task: otta
+formal_protocol: false
+protocol_track: nctta
+protocol_revision: OTTA_NCTTA_LBI_PROTOCOL_20260906_v1
+implementation_revision: nctta_otta_sparse_lbi_20260907_v2
+source_checkpoint_revision: nips2026_shot_otta_uda_source_v1
+seed: 2026
+variant: nctta_fc_lbi
+requested_budget: 0.001
+group_mode: null
+selection_seed: null
+num_random_masks: null
+
+device:
+  gpu_id: "0"
+
+data:
+  dataset: office
+  root: /inspire/hdd/global_user/gaoyachen-253308310317/dataset/dataset-luojianlan
+  source: 1
+  target: 0
+  da: uda
+  batch_size: 64
+  workers: 4
+
+model:
+  backbone: resnet50
+  bottleneck_dim: 256
+  bottleneck_type: bn
+  classifier_type: wn
+
+source_checkpoint:
+  root: /inspire/hdd/global_user/gaoyachen-253308310317/PJ/Split-LBI/nips2026/SHOT-OTTA/ckpt/source
+
+optimization:
+  optimizer: sgd
+  lr: 0.01
+  lr_decay1: 0.1
+  lr_decay2: 1.0
+  momentum: 0.9
+  weight_decay: 0.001
+  nesterov: true
+  lr_gamma: 10.0
+  lr_power: 0.75
+
+native_optimizer:
+  optimizer: sgd
+  lr: 0.001
+  momentum: 0.9
+  dampening: 0.0
+  weight_decay: 0.0
+  nesterov: true
+  scheduler: none
+
+loss:
+  nc_type: infonce
+  metric: cos
+  tau_align: 1.0
+  margin: 0.2
+  nc_reduction: none
+  batch_reduction: weighted_selected_sample_mean
+
+nctta:
+  thre_ent: 2.763102111592855
+  margin_ent: 2.763102111592855
+  reweight_ent: 1.0
+  nu: 5.0
+  eta: 1.0
+  scale: 5.0
+  top_k: 10
+  mix_prob_weight: 0.3
+
+# Reuses the existing project debug tuple only as a plumbing test.
+lbi:
+  alpha: 0.2
+  kappa: 1.0
+  nu: 1.0
+  omega: 0.5
+  stage2_lr: 0.01
+
+runtime:
+  debug_max_outer_batches: 5
+  workers_per_gpu: null
+  runtime_comparable: false
+
+output:
+  root: 260817_iclr2027-refined/runs_smoke
+  run_name: null
+  save_model: false
