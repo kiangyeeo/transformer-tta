@@ -1,0 +1,70 @@
+# DeiT-S full-dense COME-OTTA baseline: SHOT-Transformer substrate + COME objective.
+schema_version: 1
+protocol_revision: come_transformer_full_dense_otta_20260909_v1
+formal_seed: 2026
+method: come
+variant: full_dense
+
+model:
+  name: deit_small_patch16_224.fb_in1k
+  checkpoint_root: /home/nas3/biod/wangkangyi/checkpoints/source_models
+
+data:
+  list_root: /home/nas3/biod/wangkangyi/datasets/image_lists
+  office31:
+    batch_size: 64
+    fo_batch_size: 64
+    workers: 4
+    num_classes: 31
+  visda-c:
+    batch_size: 256
+    fo_batch_size: 256
+    workers: 4
+    num_classes: 12
+  preprocessing:
+    resize_size: 256
+    crop_size: 224
+    interpolation: bilinear
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+    online_random_crop: true
+    online_random_horizontal_flip: true
+    fo_center_crop: true
+  stream:
+    order: fixed_random_permutation
+    one_pass: true
+    drop_last: false
+
+adaptation:
+  update_scope: all_except_head
+  model_mode: eval
+  steps_per_online_batch: 1
+
+optimization:
+  optimizer: adamw
+  lr: 1.0e-5
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.01
+
+come:
+  objective: come_entropy_of_opinion
+  official_come_commit: 409a19b71f62c765b1a5be62347a9455524ec176
+  p: 2.0
+  tau: 1.0
+  entropy_epsilon: 1.0e-7
+  class_count_source: dataset_classifier_output_dimension
+  norm_epsilon: none
+  norm_clamp: none
+  stop_gradient_on_norm: true
+  opinion_implementation: stable_log_domain
+  renormalize_after_epsilon: false
+  tunable_hyperparameters: []
+
+runtime:
+  deterministic: true
+  amp: false
+  pin_memory: true
+
+output:
+  root: /home/nas3/biod/wangkangyi/results/transformer_come_otta_full_dense
