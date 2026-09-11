@@ -1,0 +1,84 @@
+schema_version: 1
+protocol_revision: OTTA_IST_TRANSFORMER_LBI_PROTOCOL_20260909_v1
+method: ist
+formal_seed: 2026
+
+model:
+  name: deit_small_patch16_224.fb_in1k
+  checkpoint_root: /home/nas3/biod/wangkangyi/checkpoints/source_models
+
+data:
+  list_root: /home/nas3/biod/wangkangyi/datasets/image_lists
+  office31: {batch_size: 64, fo_batch_size: 64, workers: 4, num_classes: 31}
+  visda-c: {batch_size: 256, fo_batch_size: 256, workers: 4, num_classes: 12}
+  preprocessing:
+    resize_size: 256
+    crop_size: 224
+    interpolation: bilinear
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+    online_random_crop: true
+    online_random_horizontal_flip: true
+    fo_center_crop: true
+  stream:
+    order: fixed_random_permutation
+    one_pass: true
+    drop_last: false
+    amazon_singleton_tail: merge_into_previous
+    unexpected_singleton: fail_before_state_transition
+
+ist:
+  extend: 8
+  iters: 1
+  ema_momentum: 0.9
+  feature_dim: 384
+  memory: {max_len: 10000, entry_unit: view}
+  plca:
+    repeat: 1
+    k: 50
+    gamma: 3
+    mode: l2
+    propagation_alpha: 0.99
+    solver_max_steps: 20
+    solver_rtol: 1.0e-6
+    solver_atol: 0.0
+    distance_chunk_size: 1024
+  augmentation:
+    source: raw_pre_normalization
+    resize_size: 256
+    crop_size: 224
+    horizontal_flip_probability: 0.5
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+  rng:
+    reference_seed_offset: 10000
+    adaptation_seed_offset: 20000
+    inner_order_seed_offset: 30000
+  pre_inference_chunk_size: 64
+  native_micro_batch_size: 64
+  objective_chunk_size: 64
+
+optimization:
+  optimizer: adamw
+  lr: 1.0e-5
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.01
+  scheduler: none
+
+loss:
+  components: [hard_ce, soft_kl]
+  hard_ce_weight: 1.0
+  soft_kl_weight: 1.0
+  target_granularity: view
+
+runtime:
+  deterministic: true
+  amp: false
+  pin_memory: true
+  save_model: false
+  stream_checkpoint: false
+  partial_resume: false
+
+output:
+  root: /home/nas3/biod/wangkangyi/results/transformer_ist
