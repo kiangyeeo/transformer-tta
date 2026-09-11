@@ -15,25 +15,56 @@ source W0 loading and manifest/SHA-256 verification, the target stream
 `tests/transformer_come_substrate_identity_test.py` asserts that those are the
 same code objects and that every config block matches the SHOT YAML.
 
+## Layout
+
+One flat package, one config, one runner - the same organisation as
+`transformer_ist/`. The variant is a runtime argument, not a subpackage.
+
+| Module | Holds |
+|---|---|
+| `config.py` | frozen-field validation, budgets, per-variant revisions/scopes/selection policies, transfer resolution and experiment identity |
+| `config.yaml` | the blocks shared by all five variants |
+| `objective.py` | the single backbone-agnostic COME implementation |
+| `common.py` | the objective step, the singleton guard, the RNG/state audits, collapse diagnostics |
+| `model.py` | the five update scopes, all built on the SHOT loaders |
+| `data.py`, `groups.py`, `optimizer.py` | verbatim re-exports of the SHOT stream, group partition/scorers and masked AdamW |
+| `runner.py` | the dense stream, the sparse stream, the Random three-child parent, and the `run_transfer` dispatcher |
+| `matrix.py`, `aggregate.py`, `finalize.py` | one-process-per-GPU scheduler, SHOT aggregation semantics, Random recovery |
+| `cli.py` | `transfer` / `matrix` / `finalize` |
+
 ## Implemented
 
-| Variant | Entry point | Support |
+| Variant | Support | `--budget` |
 |---|---|---|
-| `full_dense` | `python -m transformer_come.full_dense` | non-head unrestricted reference |
-| `candidate_dense` | `python -m transformer_come.candidate_dense` | all 12 candidate tensors |
-| `group_random` | `python -m transformer_come.group_random` | 3 real children, seeds 202600/1/2 |
-| `group_magnitude` | `python -m transformer_come.group_magnitude` | source-W0 paired L2, static |
-| `group_saliency` | `python -m transformer_come.group_saliency` | current-batch \|W*grad(L_COME)\| |
-
-Each supports `transfer`, `matrix` (one process per GPU) and `--dry-run`;
-`group_random` also has `finalize`.
+| `full_dense` | non-head unrestricted reference | rejected |
+| `candidate_dense` | all 12 candidate tensors | rejected |
+| `group_random` | 3 real children, seeds 202600/1/2 | required |
+| `group_magnitude` | source-W0 paired L2, static | required |
+| `group_saliency` | current-batch \|W*grad(L_COME)\| | required |
 
 ## Not implemented on purpose
 
 `group_lbi` is absent. The COME-LBI search protocol and the six
 `(alpha, kappa, nu, omega, stage2_lr)` tuples are not frozen (protocol
 sections 17 and 21), so formal COME-LBI must fail closed; there is no code
-path that could launch it with a provisional tuple.
+path that could launch it with a provisional tuple. `--variant group_lbi` is
+rejected by the CLI, by `require_supported_variant` and by
+`variant_config_view`, with no dense fallback.
+
+## Config
+
+`config.yaml` carries only what all five variants share: the model, the target
+data and stream, the optimizer, the `come:` block and the runtime policy. The
+per-variant blocks - protocol revision, `adaptation` update scope, `selection`
+policy and artifact root - are derived in `config.py` by
+`variant_config_view(raw, variant)`, which rebuilds exactly the config each
+variant used to own as its own YAML. Deriving them means a variant cannot
+acquire a different substrate through a YAML edit, and the substrate identity
+test still compares every derived block against the matching SHOT YAML.
+
+Resolution is unchanged: for all 77 formal conditions (and the 63 Random
+children) the resolved config, its `scientific_config_sha256` and its
+`experiment_key` are byte-identical to the pre-flattening per-variant packages.
 
 ## Objective
 
@@ -63,6 +94,29 @@ native_ema_commit_count = 0
 An actual `BS=1` online batch is rejected before the objective, the selector,
 the optimizer and PU, with `invalid_reason: stream_protocol_mismatch`.
 
+## CLI
+
+Validate one condition without creating artifacts:
+
+```bash
+python -m transformer_come transfer --variant candidate_dense \
+  --dataset office31 --source dslr --target amazon \
+  --device cuda --dry-run
+```
+
+One sparse condition:
+
+```bash
+python -m transformer_come transfer --variant group_saliency --budget 0.001 \
+  --dataset office31 --source dslr --target amazon --device cuda
+```
+
+`matrix` takes `--variants` (`all` or a comma-separated list) and schedules one
+process per GPU, one condition at a time per GPU. Each variant gets its own
+timestamped run root under `results/transformer_come_otta_<variant>/`;
+`--output-root` overrides that root and therefore requires a single variant.
+`finalize --run-root` re-aggregates a Random run from completed children.
+
 ## Tests
 
 ```bash
@@ -86,21 +140,22 @@ The expensive Saliency state-hash audit is off by default. Turn it on for
 correctness runs:
 
 ```bash
-COME_SELECTION_STATE_AUDIT_BATCHES=5 $PY -m transformer_come.group_saliency transfer ...
+COME_SELECTION_STATE_AUDIT_BATCHES=5 $PY -m transformer_come transfer \
+  --variant group_saliency --budget 0.001 ...
 ```
 
 ## Launching
 
-One script per variant, mirroring `transformer/<variant>/run_all.sh`. Each
-uses the matrix scheduler: one process per GPU, one condition at a time per
-GPU, artifacts under `results/transformer_come_otta_<variant>/`.
+One script per variant under `transformer_come/scripts/`, each using the matrix
+scheduler: one process per GPU, one condition at a time per GPU, artifacts
+under `results/transformer_come_otta_<variant>/`.
 
 ```bash
-./transformer_come/full_dense/run_all.sh        # 7 conditions
-./transformer_come/candidate_dense/run_all.sh   # 7 conditions
-./transformer_come/group_magnitude/run_all.sh   # 3 rho x 7 = 21 conditions
-./transformer_come/group_saliency/run_all.sh    # 3 rho x 7 = 21 conditions
-./transformer_come/group_random/run_all.sh      # 21 conditions x 3 children = 63 runs
+./transformer_come/scripts/run_full_dense.sh        # 7 conditions
+./transformer_come/scripts/run_candidate_dense.sh   # 7 conditions
+./transformer_come/scripts/run_group_magnitude.sh   # 3 rho x 7 = 21 conditions
+./transformer_come/scripts/run_group_saliency.sh    # 3 rho x 7 = 21 conditions
+./transformer_come/scripts/run_group_random.sh      # 21 conditions x 3 children = 63 runs
 ```
 
 Each script takes environment overrides (defaults shown):
@@ -110,7 +165,7 @@ Each script takes environment overrides (defaults shown):
 | `COME_<VARIANT>_GPUS` | `0,1,2,3,4,5,6,7` | physical GPU ids, one process each |
 | `COME_<VARIANT>_DATASETS` | `all` | `all`, `office31` or `visda-c` |
 | `COME_<VARIANT>_RHOS` | `all` | sparse only: `all` = 0.0005,0.001,0.002 |
-| `COME_<VARIANT>_OUTPUT_ROOT` | config `output.root` | artifact root |
+| `COME_<VARIANT>_OUTPUT_ROOT` | `results/transformer_come_otta_<variant>` | artifact root |
 | `COME_DRY_RUN` | `0` | `1` validates assets/identities, touches no GPU |
 | `COME_ALLOW_BUSY_GPUS` | `0` | `1` overrides the one-process-per-GPU guard |
 

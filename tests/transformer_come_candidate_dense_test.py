@@ -16,15 +16,16 @@ for candidate in (str(PROJECT_ROOT), str(PROJECT_ROOT / "tests")):
     if candidate not in sys.path:
         sys.path.insert(0, candidate)
 
-import transformer_come.candidate_dense.runner as runner_module  # noqa: E402
+import transformer_come.runner as runner_module  # noqa: E402
 import transformer_come.common as come_common  # noqa: E402
 from transformer.candidate_dense.config import candidate_parameter_names  # noqa: E402
-from transformer_come.candidate_dense.config import (  # noqa: E402
+from transformer_come.config import (  # noqa: E402
     CANDIDATE_SCALAR_COUNT,
     CANDIDATE_TENSOR_COUNT,
-    IMPLEMENTATION_REVISION,
-    PROTOCOL_REVISION,
-    _validate_frozen_fields,
+    IMPLEMENTATION_REVISIONS,
+    PROTOCOL_REVISIONS,
+    validate_variant_config,
+    variant_config_view,
     load_config,
 )
 
@@ -39,13 +40,14 @@ from transformer_come_fixtures import (  # noqa: E402
 )
 
 
-CONFIG_PATH = PROJECT_ROOT / "transformer_come" / "candidate_dense" / "config.yaml"
+VARIANT = "candidate_dense"
+CONFIG_PATH = PROJECT_ROOT / "transformer_come" / "config.yaml"
 
 
 def check_config() -> None:
-    config = load_config(CONFIG_PATH)
-    _validate_frozen_fields(config)
-    assert config["protocol_revision"] == PROTOCOL_REVISION
+    config = variant_config_view(load_config(CONFIG_PATH), VARIANT)
+    validate_variant_config(config, variant=VARIANT)
+    assert config["protocol_revision"] == PROTOCOL_REVISIONS[VARIANT]
     assert config["method"] == "come"
     assert config["adaptation"]["candidate_blocks"] == [9, 10, 11]
     assert config["adaptation"]["candidate_tensor_count"] == CANDIDATE_TENSOR_COUNT == 12
@@ -104,7 +106,7 @@ def check_candidate_scope_and_counts() -> dict:
     online = [row for row in rows if row["event"] == "online_batch"]
 
     assert summary["status"] == "completed"
-    assert summary["implementation_revision"] == IMPLEMENTATION_REVISION
+    assert summary["implementation_revision"] == IMPLEMENTATION_REVISIONS[VARIANT]
     assert objective_calls == batch_count
     assert summary["objective_call_count"] == batch_count
     assert summary["optimizer_step_count"] == batch_count

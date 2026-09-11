@@ -20,18 +20,18 @@ for candidate in (str(PROJECT_ROOT), str(PROJECT_ROOT / "tests")):
         sys.path.insert(0, candidate)
 
 import transformer_come.common as come_common  # noqa: E402
-import transformer_come.dense_runner as dense_runner  # noqa: E402
-import transformer_come.full_dense.runner as runner_module  # noqa: E402
-from transformer_come.full_dense.config import (  # noqa: E402
+import transformer_come.runner as runner_module  # noqa: E402
+from transformer_come.config import (  # noqa: E402
     FORMAL_SEED,
-    IMPLEMENTATION_REVISION,
-    PROTOCOL_REVISION,
+    IMPLEMENTATION_REVISIONS,
+    PROTOCOL_REVISIONS,
     TRANSFERS,
-    _validate_frozen_fields,
+    validate_variant_config,
+    variant_config_view,
     load_config,
     select_transfers,
 )
-from transformer_come.full_dense.data import build_transforms  # noqa: E402
+from transformer_come.data import build_transforms  # noqa: E402
 
 from transformer_come_fixtures import (  # noqa: E402
     BATCH_SIZE,
@@ -44,14 +44,15 @@ from transformer_come_fixtures import (  # noqa: E402
 )
 
 
-CONFIG_PATH = PROJECT_ROOT / "transformer_come" / "full_dense" / "config.yaml"
+VARIANT = "full_dense"
+CONFIG_PATH = PROJECT_ROOT / "transformer_come" / "config.yaml"
 
 
 def check_config_and_transforms() -> None:
-    config = load_config(CONFIG_PATH)
-    _validate_frozen_fields(config)
+    config = variant_config_view(load_config(CONFIG_PATH), VARIANT)
+    validate_variant_config(config, variant=VARIANT)
     assert config["formal_seed"] == FORMAL_SEED == 2026
-    assert config["protocol_revision"] == PROTOCOL_REVISION
+    assert config["protocol_revision"] == PROTOCOL_REVISIONS[VARIANT]
     assert config["method"] == "come"
     assert config["data"]["office31"]["batch_size"] == 64
     assert config["data"]["office31"]["fo_batch_size"] == 64
@@ -143,7 +144,7 @@ def check_counts_and_state() -> dict:
     assert summary["status"] == "completed"
     assert summary["result_validity"] == "valid"
     assert summary["method"] == manifest["method"] == "come"
-    assert summary["implementation_revision"] == IMPLEMENTATION_REVISION
+    assert summary["implementation_revision"] == IMPLEMENTATION_REVISIONS[VARIANT]
     # C09: exactly one objective, one backward and one host step per batch,
     # and no scheduler at all.
     assert objective_calls == batch_count

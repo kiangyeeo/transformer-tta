@@ -16,15 +16,14 @@ for candidate in (str(PROJECT_ROOT), str(PROJECT_ROOT / "tests")):
     if candidate not in sys.path:
         sys.path.insert(0, candidate)
 
-import transformer_come.candidate_dense.runner as dense_runner_module  # noqa: E402
+import transformer_come.runner as runner_module  # noqa: E402
 import transformer_come.common as come_common  # noqa: E402
-import transformer_come.group_saliency.runner as saliency_runner_module  # noqa: E402
 from transformer.candidate_dense.model import hash_tensors  # noqa: E402
 from transformer.source_only.data import (  # noqa: E402
     FixedOrderSampler,
     MergeSingletonTailBatchSampler,
 )
-from transformer_come.budget import budget_group_count  # noqa: E402
+from transformer_come.config import budget_group_count  # noqa: E402
 from transformer_come.common import ComeRunInvalid, guard_online_batch  # noqa: E402
 
 from transformer_come_fixtures import (  # noqa: E402
@@ -85,20 +84,20 @@ def check_singleton_fails_before_any_adaptation() -> dict:
     CandidateShapedModel.forward_calls = 0
     objective_calls = {"count": 0}
     original_come_loss = come_common.come_loss
-    original_loaders = dense_runner_module.build_target_loaders
+    original_loaders = runner_module.build_target_loaders
 
     def counting_come_loss(logits, class_count, **kwargs):
         objective_calls["count"] += 1
         return original_come_loss(logits, class_count, **kwargs)
 
     come_common.come_loss = counting_come_loss
-    dense_runner_module.build_target_loaders = _singleton_loaders
+    runner_module.build_target_loaders = _singleton_loaders
     try:
         with tempfile.TemporaryDirectory(prefix="come_singleton_") as value:
             output_dir = Path(value) / "run"
             config = synthetic_config("candidate_dense", output_dir=output_dir)
             try:
-                dense_runner_module.run_transfer(
+                runner_module.run_transfer(
                     config,
                     PROJECT_ROOT,
                     show_progress=False,
@@ -115,7 +114,7 @@ def check_singleton_fails_before_any_adaptation() -> dict:
             rows = read_metrics(output_dir)
     finally:
         come_common.come_loss = original_come_loss
-        dense_runner_module.build_target_loaders = original_loaders
+        runner_module.build_target_loaders = original_loaders
 
     assert summary["status"] == "failed"
     assert summary["result_validity"] == "invalid"
@@ -148,18 +147,18 @@ def _loaders_with_label_shift(shift: int):
 
 def _run_dense_with_labels(shift: int):
     captured = {}
-    original_loaders = dense_runner_module.build_target_loaders
+    original_loaders = runner_module.build_target_loaders
 
     def capturing_loader(config, device):
         loaded = load_candidate_scope_model(config, device)
         captured["model"] = loaded[0]
         return loaded
 
-    dense_runner_module.build_target_loaders = _loaders_with_label_shift(shift)
+    runner_module.build_target_loaders = _loaders_with_label_shift(shift)
     try:
         with tempfile.TemporaryDirectory(prefix="come_labels_dense_") as value:
             output_dir = Path(value) / "run"
-            summary = dense_runner_module.run_transfer(
+            summary = runner_module.run_transfer(
                 synthetic_config("candidate_dense", output_dir=output_dir),
                 PROJECT_ROOT,
                 show_progress=False,
@@ -167,17 +166,17 @@ def _run_dense_with_labels(shift: int):
             )
             return summary, captured["model"]
     finally:
-        dense_runner_module.build_target_loaders = original_loaders
+        runner_module.build_target_loaders = original_loaders
 
 
 def _run_saliency_with_labels(shift: int):
-    original_loaders = saliency_runner_module.build_target_loaders
-    saliency_runner_module.build_target_loaders = _loaders_with_label_shift(shift)
+    original_loaders = runner_module.build_target_loaders
+    runner_module.build_target_loaders = _loaders_with_label_shift(shift)
     try:
         with tempfile.TemporaryDirectory(prefix="come_labels_saliency_") as value:
             output_dir = Path(value) / "run"
             budget = 0.002
-            summary = saliency_runner_module.run_transfer(
+            summary = runner_module.run_transfer(
                 synthetic_config(
                     "group_saliency",
                     output_dir=output_dir,
@@ -196,7 +195,7 @@ def _run_saliency_with_labels(shift: int):
             ]
             return summary, rows
     finally:
-        saliency_runner_module.build_target_loaders = original_loaders
+        runner_module.build_target_loaders = original_loaders
 
 
 def check_target_labels_do_not_reach_adaptation() -> dict:
@@ -241,7 +240,7 @@ def check_target_labels_do_not_reach_adaptation() -> dict:
 
 def check_pu_and_fo_are_read_only() -> dict:
     """C25: PU is a separate post-update forward; FO changes nothing."""
-    original_loaders = dense_runner_module.build_target_loaders
+    original_loaders = runner_module.build_target_loaders
     captured = {}
 
     def capturing_loader(config, device):
@@ -249,19 +248,19 @@ def check_pu_and_fo_are_read_only() -> dict:
         captured["model"] = loaded[0]
         return loaded
 
-    dense_runner_module.build_target_loaders = build_synthetic_loaders
+    runner_module.build_target_loaders = build_synthetic_loaders
     CandidateShapedModel.forward_calls = 0
     try:
         with tempfile.TemporaryDirectory(prefix="come_pu_fo_") as value:
             output_dir = Path(value) / "run"
-            summary = dense_runner_module.run_transfer(
+            summary = runner_module.run_transfer(
                 synthetic_config("candidate_dense", output_dir=output_dir),
                 PROJECT_ROOT,
                 show_progress=False,
                 model_loader=capturing_loader,
             )
     finally:
-        dense_runner_module.build_target_loaders = original_loaders
+        runner_module.build_target_loaders = original_loaders
 
     batch_count = SAMPLE_COUNT // BATCH_SIZE
     assert summary["pu_is_post_update_same_batch"] is True

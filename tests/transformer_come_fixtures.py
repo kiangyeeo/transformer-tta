@@ -23,11 +23,11 @@ from transformer.candidate_dense.model import (
     EXPECTED_SHAPES,
     configure_candidate_dense_scope,
 )
-from transformer_come.common_config import (
+from transformer_come.config import (
     CANDIDATE_ADAPTATION,
     FULL_DENSE_ADAPTATION,
 )
-from transformer_come.identity import (
+from transformer_come.config import (
     EXPECTED_COME_BLOCK,
     IMPLEMENTATION_REVISIONS,
     PROTOCOL_REVISIONS,

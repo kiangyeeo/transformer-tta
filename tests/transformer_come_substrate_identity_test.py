@@ -31,27 +31,27 @@ import transformer.group_saliency.groups as shot_saliency_groups  # noqa: E402
 import transformer.source_only.data as shot_data  # noqa: E402
 import transformer.source_only.model as shot_source_model  # noqa: E402
 
-import transformer_come.budget as come_budget  # noqa: E402
-import transformer_come.candidate_dense.config as come_candidate_config  # noqa: E402
-import transformer_come.candidate_dense.model as come_candidate_model  # noqa: E402
-import transformer_come.full_dense.data as come_full_data  # noqa: E402
-import transformer_come.full_dense.model as come_full_model  # noqa: E402
-import transformer_come.group_magnitude.groups as come_magnitude_groups  # noqa: E402
-import transformer_come.group_random.groups as come_random_groups  # noqa: E402
-import transformer_come.group_random.optimizer as come_optimizer  # noqa: E402
-import transformer_come.group_saliency.groups as come_saliency_groups  # noqa: E402
-from transformer_come.common_config import (  # noqa: E402
-    NON_SCIENTIFIC_KEYS,
-    finalize_identity,
-)
-from transformer_come.identity import (  # noqa: E402
+import transformer_come.config as come_config  # noqa: E402
+import transformer_come.data as come_data  # noqa: E402
+import transformer_come.groups as come_groups  # noqa: E402
+import transformer_come.model as come_model  # noqa: E402
+import transformer_come.optimizer as come_optimizer  # noqa: E402
+from transformer_come.config import (  # noqa: E402
     BASELINE_IMPLEMENTATION_REVISION,
     EXPECTED_COME_BLOCK,
     IMPLEMENTATION_REVISIONS,
+    NON_SCIENTIFIC_KEYS,
     PROTOCOL_REVISIONS,
     SPARSE_LBI_IMPLEMENTATION_REVISION,
+    finalize_identity,
+    load_config,
+    validate_raw_config,
+    validate_variant_config,
+    variant_config_view,
 )
 
+
+COME_CONFIG = PROJECT_ROOT / "transformer_come" / "config.yaml"
 
 VARIANTS = (
     "full_dense",
@@ -82,7 +82,9 @@ def check_configs_match_shot() -> dict:
     report = {}
     for variant in VARIANTS:
         shot = _load(PROJECT_ROOT / "transformer" / variant / "config.yaml")
-        come = _load(PROJECT_ROOT / "transformer_come" / variant / "config.yaml")
+        # The flat COME config plus the derived per-variant blocks must still
+        # present exactly the config this variant used to own as its own YAML.
+        come = variant_config_view(_load(COME_CONFIG), variant)
 
         assert shot["method"] == "shot"
         assert come["method"] == "come"
@@ -117,11 +119,11 @@ def check_configs_match_shot() -> dict:
 def check_candidate_and_group_universe() -> dict:
     """Contract B: exact names/shapes/groups/budgets, shared code objects."""
     assert (
-        come_candidate_config.candidate_parameter_names
+        come_config.candidate_parameter_names
         is shot_candidate_config.candidate_parameter_names
     )
-    names = come_candidate_config.candidate_parameter_names()
-    assert len(names) == come_candidate_config.CANDIDATE_TENSOR_COUNT == 12
+    names = come_config.candidate_parameter_names()
+    assert len(names) == come_config.CANDIDATE_TENSOR_COUNT == 12
     assert names == tuple(
         f"blocks.{block}.{suffix}"
         for block in (9, 10, 11)
@@ -132,32 +134,32 @@ def check_candidate_and_group_universe() -> dict:
             "mlp.fc2.weight",
         )
     )
-    assert come_candidate_config.CANDIDATE_SCALAR_COUNT == 5_308_416
-    assert come_candidate_model.EXPECTED_SHAPES is shot_candidate_model.EXPECTED_SHAPES
+    assert come_config.CANDIDATE_SCALAR_COUNT == 5_308_416
+    assert come_model.EXPECTED_SHAPES is shot_candidate_model.EXPECTED_SHAPES
     assert (
-        come_candidate_model.configure_candidate_dense_scope
+        come_model.configure_candidate_dense_scope
         is shot_candidate_model.configure_candidate_dense_scope
     )
     scalar_total = sum(
         shape[0] * shape[1]
-        for suffix, shape in come_candidate_model.EXPECTED_SHAPES.items()
+        for suffix, shape in come_model.EXPECTED_SHAPES.items()
     ) * 3
     assert scalar_total == 5_308_416
 
-    assert come_random_groups.STRUCTURAL_GROUPS is shot_random_groups.STRUCTURAL_GROUPS
-    assert come_magnitude_groups.STRUCTURAL_GROUPS is shot_random_groups.STRUCTURAL_GROUPS
-    assert come_saliency_groups.STRUCTURAL_GROUPS is shot_random_groups.STRUCTURAL_GROUPS
-    assert len(come_random_groups.STRUCTURAL_GROUPS) == come_budget.TOTAL_GROUPS == 6912
-    assert come_budget.GROUP_SIZE == 768
-    assert come_budget.TOTAL_GROUPS * come_budget.GROUP_SIZE == 5_308_416
-    assert come_random_groups.build_masks is shot_random_groups.build_masks
-    assert come_random_groups.selected_group_ids is shot_random_groups.selected_group_ids
+    assert come_groups.STRUCTURAL_GROUPS is shot_random_groups.STRUCTURAL_GROUPS
+    assert come_groups.STRUCTURAL_GROUPS is shot_random_groups.STRUCTURAL_GROUPS
+    assert come_groups.STRUCTURAL_GROUPS is shot_random_groups.STRUCTURAL_GROUPS
+    assert len(come_groups.STRUCTURAL_GROUPS) == come_config.TOTAL_GROUPS == 6912
+    assert come_config.GROUP_SIZE == 768
+    assert come_config.TOTAL_GROUPS * come_config.GROUP_SIZE == 5_308_416
+    assert come_groups.build_masks is shot_random_groups.build_masks
+    assert come_groups.selected_group_ids is shot_random_groups.selected_group_ids
     assert (
-        come_magnitude_groups.compute_group_l2_scores
+        come_groups.compute_group_l2_scores
         is shot_magnitude_groups.compute_group_l2_scores
     )
     assert (
-        come_saliency_groups.compute_group_saliency_scores
+        come_groups.compute_group_saliency_scores
         is shot_saliency_groups.compute_group_saliency_scores
     )
     assert (
@@ -167,21 +169,21 @@ def check_candidate_and_group_universe() -> dict:
         come_optimizer.assert_off_mask_adam_state_zero
         is shot_optimizer.assert_off_mask_adam_state_zero
     )
-    assert come_full_data.build_target_loaders is shot_data.build_target_loaders
+    assert come_data.build_target_loaders is shot_data.build_target_loaders
     assert (
-        come_full_data.MergeSingletonTailBatchSampler
+        come_data.MergeSingletonTailBatchSampler
         is shot_data.MergeSingletonTailBatchSampler
     )
     assert "load_frozen_source_model" in dir(shot_source_model)
-    assert come_full_model.hash_tensors is shot_candidate_model.hash_tensors
+    assert come_model.hash_tensors is shot_candidate_model.hash_tensors
 
-    assert come_budget.budget_group_count is shot_random_config.budget_group_count
+    assert come_config.budget_group_count is shot_random_config.budget_group_count
     integer_budgets = {
-        rho: come_budget.budget_group_count(rho) for rho in (0.0005, 0.001, 0.002)
+        rho: come_config.budget_group_count(rho) for rho in (0.0005, 0.001, 0.002)
     }
     assert integer_budgets == {0.0005: 3, 0.001: 6, 0.002: 13}
-    assert come_budget.MASK_SEEDS == (202600, 202601, 202602)
-    assert come_budget.NUM_RANDOM_MASKS == 3
+    assert come_config.MASK_SEEDS == (202600, 202601, 202602)
+    assert come_config.NUM_RANDOM_MASKS == 3
     return {
         "integer_budgets": {str(key): value for key, value in integer_budgets.items()},
         "active_scalars": {
@@ -192,7 +194,7 @@ def check_candidate_and_group_universe() -> dict:
 
 def check_optimizer_settings_match() -> None:
     for variant in VARIANTS:
-        come = _load(PROJECT_ROOT / "transformer_come" / variant / "config.yaml")
+        come = variant_config_view(_load(COME_CONFIG), variant)
         assert come["optimization"] == {
             "optimizer": "adamw",
             "lr": 1.0e-5,
@@ -268,14 +270,11 @@ def check_scientific_identity_changes_with_objective() -> dict:
 
 
 def check_validators_fail_closed() -> dict:
-    import transformer_come.full_dense.config as full_dense_config
-    import transformer_come.group_saliency.config as saliency_config
-
     rejected = 0
-    config = full_dense_config.load_config(
-        PROJECT_ROOT / "transformer_come" / "full_dense" / "config.yaml"
-    )
-    full_dense_config._validate_frozen_fields(config)
+    raw = load_config(COME_CONFIG)
+    validate_raw_config(raw)
+    config = variant_config_view(raw, "full_dense")
+    validate_variant_config(config, variant="full_dense")
     for mutate in (
         lambda item: item.update({"method": "shot"}),
         lambda item: item.update({"loss": {"cls_par": 0.3}}),
@@ -290,24 +289,58 @@ def check_validators_fail_closed() -> dict:
         broken = copy.deepcopy(config)
         mutate(broken)
         try:
-            full_dense_config._validate_frozen_fields(broken)
+            validate_variant_config(broken, variant="full_dense")
         except ValueError:
             rejected += 1
         else:
             raise AssertionError("A frozen-field mutation was accepted")
 
-    saliency = saliency_config.load_config(
-        PROJECT_ROOT / "transformer_come" / "group_saliency" / "config.yaml"
-    )
-    saliency_config._validate_frozen_fields(saliency)
+    saliency = variant_config_view(raw, "group_saliency")
+    validate_variant_config(saliency, variant="group_saliency")
     broken = copy.deepcopy(saliency)
     broken["selection"]["integer_rule"] = "ceil"
     try:
-        saliency_config._validate_frozen_fields(broken)
+        validate_variant_config(broken, variant="group_saliency")
     except ValueError:
         rejected += 1
     else:
         raise AssertionError("A non-floor integer rule was accepted")
+
+    # The shared YAML itself must stay fail-closed: the blocks it still owns
+    # cannot drift, and it must not regrow the per-variant keys the view
+    # derives or a SHOT loss block.
+    for mutate in (
+        lambda item: item.update({"method": "shot"}),
+        lambda item: item.update({"loss": {"cls_par": 0.3}}),
+        lambda item: item.update({"variant": "full_dense"}),
+        lambda item: item.update({"selection": {"integer_rule": "ceil"}}),
+        lambda item: item.update({"protocol_document": "some_other_protocol_v9"}),
+        lambda item: item["come"].update({"tau": 0.5}),
+        lambda item: item["optimization"].update({"lr": 1.0e-4}),
+        lambda item: item["data"]["preprocessing"].update({"interpolation": "bicubic"}),
+        lambda item: item["runtime"].update({"amp": True}),
+    ):
+        broken_raw = copy.deepcopy(raw)
+        mutate(broken_raw)
+        try:
+            validate_raw_config(broken_raw)
+        except ValueError:
+            rejected += 1
+        else:
+            raise AssertionError("A frozen shared-config mutation was accepted")
+
+    # group_lbi must fail closed with no dense fallback.
+    for call in (
+        lambda: variant_config_view(raw, "group_lbi"),
+        lambda: come_config.require_supported_variant("group_lbi"),
+    ):
+        try:
+            call()
+        except ValueError as error:
+            assert "group_lbi" in str(error)
+            rejected += 1
+        else:
+            raise AssertionError("group_lbi was accepted")
     return {"rejected_frozen_field_mutations": rejected}
 
 

@@ -18,20 +18,21 @@ for candidate in (str(PROJECT_ROOT), str(PROJECT_ROOT / "tests")):
         sys.path.insert(0, candidate)
 
 import transformer_come.common as come_common  # noqa: E402
-import transformer_come.group_random.runner as runner_module  # noqa: E402
+import transformer_come.runner as runner_module  # noqa: E402
 from transformer.candidate_dense.model import hash_tensors  # noqa: E402
-from transformer_come.budget import budget_group_count  # noqa: E402
-from transformer_come.group_random.config import (  # noqa: E402
-    EXPECTED_SELECTION,
+from transformer_come.config import budget_group_count  # noqa: E402
+from transformer_come.config import (  # noqa: E402
+    SELECTION_BLOCKS,
     FORMAL_BUDGETS,
-    IMPLEMENTATION_REVISION,
+    IMPLEMENTATION_REVISIONS,
     MASK_SEEDS,
     NUM_RANDOM_MASKS,
-    PROTOCOL_REVISION,
-    _validate_frozen_fields,
+    PROTOCOL_REVISIONS,
+    validate_variant_config,
+    variant_config_view,
     load_config,
 )
-from transformer_come.group_random.groups import (  # noqa: E402
+from transformer_come.groups import (  # noqa: E402
     mask_sha256,
     selected_group_ids,
 )
@@ -48,16 +49,17 @@ from transformer_come_fixtures import (  # noqa: E402
 )
 
 
-CONFIG_PATH = PROJECT_ROOT / "transformer_come" / "group_random" / "config.yaml"
+VARIANT = "group_random"
+CONFIG_PATH = PROJECT_ROOT / "transformer_come" / "config.yaml"
 BUDGET = 0.001
 
 
 def check_config() -> None:
-    config = load_config(CONFIG_PATH)
-    _validate_frozen_fields(config)
-    assert config["protocol_revision"] == PROTOCOL_REVISION
+    config = variant_config_view(load_config(CONFIG_PATH), VARIANT)
+    validate_variant_config(config, variant=VARIANT)
+    assert config["protocol_revision"] == PROTOCOL_REVISIONS[VARIANT]
     assert config["method"] == "come"
-    assert config["selection"] == EXPECTED_SELECTION
+    assert config["selection"] == SELECTION_BLOCKS[VARIANT]
     assert config["selection"]["mask_seeds"] == [202600, 202601, 202602]
     assert config["selection"]["num_random_masks"] == 3
     assert config["selection"]["cross_budget_policy"] == "nested_prefix_same_permutation"
@@ -203,7 +205,7 @@ def check_three_real_children() -> dict:
         assert abs(summary[f"{prefix}-Acc"] - statistics.fmean(values)) < 1e-12
         assert abs(summary[f"{prefix}-Acc-mask-std"] - statistics.pstdev(values)) < 1e-12
     assert summary["method"] == "come"
-    assert summary["implementation_revision"] == IMPLEMENTATION_REVISION
+    assert summary["implementation_revision"] == IMPLEMENTATION_REVISIONS[VARIANT]
     assert summary["num_random_masks"] == 3
     assert summary["mask_seeds"] == list(MASK_SEEDS)
     assert len(summary["masks"]) == 3

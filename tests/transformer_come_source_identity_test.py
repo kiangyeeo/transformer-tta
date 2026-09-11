@@ -27,10 +27,8 @@ if str(PROJECT_ROOT) not in sys.path:
 import transformer.candidate_dense.config as shot_candidate_config  # noqa: E402
 import transformer.full_dense.config as shot_full_config  # noqa: E402
 import transformer.full_dense.model as shot_full_model  # noqa: E402
-import transformer_come.candidate_dense.config as come_candidate_config  # noqa: E402
-import transformer_come.candidate_dense.model as come_candidate_model  # noqa: E402
-import transformer_come.full_dense.config as come_full_config  # noqa: E402
-import transformer_come.full_dense.model as come_full_model  # noqa: E402
+import transformer_come.config as come_config  # noqa: E402
+import transformer_come.model as come_model_module  # noqa: E402
 from transformer_come.common import come_objective_step  # noqa: E402
 
 
@@ -40,7 +38,10 @@ CHECKPOINT = Path(
 )
 
 
-def _resolve(module, config_path: Path, output_dir: Path) -> dict:
+COME_CONFIG = PROJECT_ROOT / "transformer_come" / "config.yaml"
+
+
+def _resolve_shot(module, config_path: Path, output_dir: Path) -> dict:
     dataset, source, target = TRANSFER
     return module.resolve_transfer_config(
         module.load_config(config_path),
@@ -48,6 +49,20 @@ def _resolve(module, config_path: Path, output_dir: Path) -> dict:
         dataset=dataset,
         source=source,
         target=target,
+        device="cpu",
+        output_dir=output_dir,
+    )
+
+
+def _resolve_come(variant: str, output_dir: Path) -> dict:
+    dataset, source, target = TRANSFER
+    return come_config.resolve_transfer_config(
+        come_config.load_config(COME_CONFIG),
+        project_root=PROJECT_ROOT,
+        dataset=dataset,
+        source=source,
+        target=target,
+        variant=variant,
         device="cpu",
         output_dir=output_dir,
     )
@@ -65,20 +80,14 @@ def main() -> int:
         )
         return 0
 
-    shot = _resolve(
+    shot = _resolve_shot(
         shot_full_config,
         PROJECT_ROOT / "transformer" / "full_dense" / "config.yaml",
         Path("/tmp/come-c01-shot"),
     )
-    come = _resolve(
-        come_full_config,
-        PROJECT_ROOT / "transformer_come" / "full_dense" / "config.yaml",
-        Path("/tmp/come-c01-come"),
-    )
-    come_candidate = _resolve(
-        come_candidate_config,
-        PROJECT_ROOT / "transformer_come" / "candidate_dense" / "config.yaml",
-        Path("/tmp/come-c01-candidate"),
+    come = _resolve_come("full_dense", Path("/tmp/come-c01-come"))
+    come_candidate = _resolve_come(
+        "candidate_dense", Path("/tmp/come-c01-candidate")
     )
 
     # Same source W0, same provenance, different scientific identity.
@@ -106,7 +115,7 @@ def main() -> int:
     device = torch.device("cpu")
     shot_model, shot_record, _, _ = shot_full_model.load_full_dense_model(shot, device)
     come_model, come_record, come_trainable, come_frozen, _ = (
-        come_full_model.load_full_dense_model(come, device)
+        come_model_module.load_full_dense_model(come, device)
     )
     assert shot_record["sha256"] == come_record["sha256"] == come["checkpoint_sha256"]
     assert shot_record["path"] == come_record["path"]
@@ -124,7 +133,7 @@ def main() -> int:
 
     # The same W0 also drives the candidate-dense scope identically.
     candidate_model, _, candidates, _, _ = (
-        come_candidate_model.load_candidate_dense_model(come_candidate, device)
+        come_model_module.load_candidate_dense_model(come_candidate, device)
     )
     candidate_model.eval()
     with torch.no_grad():
@@ -149,7 +158,7 @@ def main() -> int:
         ".pth", ".last.pth"
     )}
     try:
-        come_full_model.load_full_dense_model(last_config, device)
+        come_model_module.load_full_dense_model(last_config, device)
     except ValueError as error:
         assert "last.pth" in str(error)
         rejected += 1
@@ -158,7 +167,7 @@ def main() -> int:
     # A mismatched hash must be refused.
     wrong_hash = {**come, "checkpoint_sha256": "0" * 64}
     try:
-        come_full_model.load_full_dense_model(wrong_hash, device)
+        come_model_module.load_full_dense_model(wrong_hash, device)
     except ValueError:
         rejected += 1
     else:

@@ -16,19 +16,19 @@ for candidate in (str(PROJECT_ROOT), str(PROJECT_ROOT / "tests")):
     if candidate not in sys.path:
         sys.path.insert(0, candidate)
 
-from transformer_come.budget import (  # noqa: E402
+from transformer_come.config import (  # noqa: E402
     FORMAL_BUDGETS,
     GROUP_SIZE,
     MASK_SEEDS,
     TOTAL_GROUPS,
     budget_group_count,
 )
-from transformer_come.group_random.groups import (  # noqa: E402
+from transformer_come.groups import (  # noqa: E402
     STRUCTURAL_GROUPS,
     build_masks,
     selected_group_ids,
 )
-from transformer_come.group_random.optimizer import (  # noqa: E402
+from transformer_come.optimizer import (  # noqa: E402
     assert_off_mask_adam_state_zero,
     strict_masked_adamw_step,
 )

@@ -18,16 +18,17 @@ for candidate in (str(PROJECT_ROOT), str(PROJECT_ROOT / "tests")):
 
 import transformer.group_magnitude.groups as shot_magnitude_groups  # noqa: E402
 import transformer_come.common as come_common  # noqa: E402
-import transformer_come.group_magnitude.runner as runner_module  # noqa: E402
-from transformer_come.budget import budget_group_count  # noqa: E402
-from transformer_come.group_magnitude.config import (  # noqa: E402
-    EXPECTED_SELECTION,
-    IMPLEMENTATION_REVISION,
-    PROTOCOL_REVISION,
-    _validate_frozen_fields,
+import transformer_come.runner as runner_module  # noqa: E402
+from transformer_come.config import budget_group_count  # noqa: E402
+from transformer_come.config import (  # noqa: E402
+    SELECTION_BLOCKS,
+    IMPLEMENTATION_REVISIONS,
+    PROTOCOL_REVISIONS,
+    validate_variant_config,
+    variant_config_view,
     load_config,
 )
-from transformer_come.group_magnitude.groups import (  # noqa: E402
+from transformer_come.groups import (  # noqa: E402
     compute_group_l2_scores,
     select_magnitude_group_ids,
 )
@@ -44,16 +45,17 @@ from transformer_come_fixtures import (  # noqa: E402
 )
 
 
-CONFIG_PATH = PROJECT_ROOT / "transformer_come" / "group_magnitude" / "config.yaml"
+VARIANT = "group_magnitude"
+CONFIG_PATH = PROJECT_ROOT / "transformer_come" / "config.yaml"
 BUDGET = 0.002
 
 
 def check_config() -> None:
-    config = load_config(CONFIG_PATH)
-    _validate_frozen_fields(config)
-    assert config["protocol_revision"] == PROTOCOL_REVISION
+    config = variant_config_view(load_config(CONFIG_PATH), VARIANT)
+    validate_variant_config(config, variant=VARIANT)
+    assert config["protocol_revision"] == PROTOCOL_REVISIONS[VARIANT]
     assert config["method"] == "come"
-    assert config["selection"] == EXPECTED_SELECTION
+    assert config["selection"] == SELECTION_BLOCKS[VARIANT]
     assert config["selection"]["score_dtype"] == "float64"
     assert config["selection"]["score_device"] == "cpu"
     assert config["selection"]["ranking_source"] == "source_checkpoint_pre_adaptation"
@@ -157,7 +159,7 @@ def check_static_support_and_counts() -> dict:
     group_count = budget_group_count(BUDGET)
 
     assert summary["status"] == "completed"
-    assert summary["implementation_revision"] == IMPLEMENTATION_REVISION
+    assert summary["implementation_revision"] == IMPLEMENTATION_REVISIONS[VARIANT]
     # Scored exactly once, before the stream: never per batch.
     assert scoring_calls == 1
     assert objective_calls == batch_count

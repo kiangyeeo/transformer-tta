@@ -24,18 +24,18 @@ for candidate in (str(PROJECT_ROOT), str(PROJECT_ROOT / "tests")):
         sys.path.insert(0, candidate)
 
 import transformer_come.common as come_common  # noqa: E402
-import transformer_come.group_saliency.runner as runner_module  # noqa: E402
-import transformer_come.sparse_runner as sparse_runner  # noqa: E402
-from transformer_come.budget import budget_group_count  # noqa: E402
-from transformer_come.group_random.groups import build_masks  # noqa: E402
-from transformer_come.group_saliency.config import (  # noqa: E402
-    EXPECTED_SELECTION,
-    IMPLEMENTATION_REVISION,
-    PROTOCOL_REVISION,
-    _validate_frozen_fields,
+import transformer_come.runner as runner_module  # noqa: E402
+from transformer_come.config import budget_group_count  # noqa: E402
+from transformer_come.groups import build_masks  # noqa: E402
+from transformer_come.config import (  # noqa: E402
+    SELECTION_BLOCKS,
+    IMPLEMENTATION_REVISIONS,
+    PROTOCOL_REVISIONS,
+    validate_variant_config,
+    variant_config_view,
     load_config,
 )
-from transformer_come.group_saliency.groups import (  # noqa: E402
+from transformer_come.groups import (  # noqa: E402
     compute_group_saliency_scores,
     select_saliency_group_ids,
 )
@@ -52,17 +52,18 @@ from transformer_come_fixtures import (  # noqa: E402
 )
 
 
-CONFIG_PATH = PROJECT_ROOT / "transformer_come" / "group_saliency" / "config.yaml"
+VARIANT = "group_saliency"
+CONFIG_PATH = PROJECT_ROOT / "transformer_come" / "config.yaml"
 BUDGET = 0.002
 CANDIDATE_PREFIXES = ("blocks.9.", "blocks.10.", "blocks.11.")
 
 
 def check_config() -> None:
-    config = load_config(CONFIG_PATH)
-    _validate_frozen_fields(config)
-    assert config["protocol_revision"] == PROTOCOL_REVISION
+    config = variant_config_view(load_config(CONFIG_PATH), VARIANT)
+    validate_variant_config(config, variant=VARIANT)
+    assert config["protocol_revision"] == PROTOCOL_REVISIONS[VARIANT]
     assert config["method"] == "come"
-    assert config["selection"] == EXPECTED_SELECTION
+    assert config["selection"] == SELECTION_BLOCKS[VARIANT]
     assert (
         config["selection"]["ranking_source"]
         == "current_pre_update_weight_and_current_come_gradient"
@@ -92,7 +93,7 @@ def _run(*, select_override=None, audit_batches=None, keep_gradient_batches=2):
     original_come_loss = come_common.come_loss
     original_loaders = runner_module.build_target_loaders
     original_select = runner_module._select_support
-    original_step = sparse_runner.strict_masked_adamw_step
+    original_step = runner_module.strict_masked_adamw_step
     original_audit = runner_module.SELECTION_AUDIT_BATCHES
 
     def counting_come_loss(logits, class_count, **kwargs):
@@ -129,7 +130,7 @@ def _run(*, select_override=None, audit_batches=None, keep_gradient_batches=2):
     come_common.come_loss = counting_come_loss
     runner_module.build_target_loaders = build_synthetic_loaders
     runner_module._select_support = spy_select
-    sparse_runner.strict_masked_adamw_step = spy_step
+    runner_module.strict_masked_adamw_step = spy_step
     if audit_batches is not None:
         runner_module.SELECTION_AUDIT_BATCHES = audit_batches
     try:
@@ -162,7 +163,7 @@ def _run(*, select_override=None, audit_batches=None, keep_gradient_batches=2):
         come_common.come_loss = original_come_loss
         runner_module.build_target_loaders = original_loaders
         runner_module._select_support = original_select
-        sparse_runner.strict_masked_adamw_step = original_step
+        runner_module.strict_masked_adamw_step = original_step
         runner_module.SELECTION_AUDIT_BATCHES = original_audit
 
 
