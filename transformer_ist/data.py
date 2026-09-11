@@ -188,13 +188,33 @@ class ISTViewMaterializer:
                     return image.convert("RGB")
         raise TypeError(f"unsupported raw image type: {type(raw_image)!r}")
 
-    def _view(self, image, generator):
-        resized = tvf.resize(
+    def _resize(self, image):
+        """Resize one decoded image once, before any view is drawn.
+
+        The resize is fully determined by the decoded image and the frozen
+        augmentation block - fixed square target size, fixed bilinear
+        interpolation, antialias on, no RNG - so every view of a sample used to
+        recompute a bit-identical result.  Hoisting it out of :meth:`_view`
+        therefore changes no pixel and consumes no generator draw, while
+        removing the ``1 + extend - 1`` redundant full-resolution resizes per
+        sample that dominated the single-threaded materialization cost.
+        """
+
+        return tvf.resize(
             image,
             [self.resize_size, self.resize_size],
             interpolation=InterpolationMode.BILINEAR,
             antialias=True,
         )
+
+    def _view(self, resized, generator):
+        """Draw one view from an already-resized image.
+
+        Only the crop origin and the flip come from ``generator``, and they are
+        drawn in exactly the order the protocol fixes: per sample, the
+        reference view first, then ``extend`` adaptation views.
+        """
+
         maximum = self.resize_size - self.crop_size
         top = int(torch.randint(maximum + 1, (1,), generator=generator).item())
         left = int(torch.randint(maximum + 1, (1,), generator=generator).item())
@@ -223,12 +243,14 @@ class ISTViewMaterializer:
         references, adaptations = [], []
         reference_trace, adaptation_trace = [], []
         for raw_image, sample_index in zip(raw_images, indices.tolist()):
-            image = self._decode(raw_image)
-            reference, trace = self._view(image, self.reference_generator)
+            # One decode and one resize per raw sample; the 1 + extend views
+            # then differ only by their crop origin and flip.
+            resized = self._resize(self._decode(raw_image))
+            reference, trace = self._view(resized, self.reference_generator)
             references.append(reference)
             reference_trace.append({"sample_index": sample_index, **trace})
             for view_index in range(self.extend):
-                adaptation, trace = self._view(image, self.adaptation_generator)
+                adaptation, trace = self._view(resized, self.adaptation_generator)
                 adaptations.append(adaptation)
                 adaptation_trace.append(
                     {
