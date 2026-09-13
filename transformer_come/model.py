@@ -1,4 +1,4 @@
-"""Source W0 loading and the five COME update scopes, shared with SHOT.
+"""Source W0 loading and COME update scopes, shared with SHOT.
 
 COME must use the same source checkpoint, the same manifest/SHA-256
 verification and the same scopes as the matched SHOT-Transformer baselines, so
@@ -24,6 +24,7 @@ from .config import (
     GROUP_MAGNITUDE,
     GROUP_RANDOM,
     GROUP_SALIENCY,
+    GROUP_LBI,
 )
 
 
@@ -32,6 +33,7 @@ SELECTION_METHODS = {
     GROUP_RANDOM: "uniform_structural_group_random",
     GROUP_MAGNITUDE: "source_w0_structural_group_l2",
     GROUP_SALIENCY: "dynamic_abs_weight_times_gradient_group_l2",
+    GROUP_LBI: "group_split_lbi",
 }
 
 
@@ -97,12 +99,19 @@ def load_group_saliency_model(config: dict, device):
     )
 
 
+def load_group_lbi_model(config: dict, device):
+    return _load_candidate_scope_model(
+        config, device, selection_method=SELECTION_METHODS[GROUP_LBI]
+    )
+
+
 MODEL_LOADERS = {
     FULL_DENSE: load_full_dense_model,
     CANDIDATE_DENSE: load_candidate_dense_model,
     GROUP_RANDOM: load_group_random_model,
     GROUP_MAGNITUDE: load_group_magnitude_model,
     GROUP_SALIENCY: load_group_saliency_model,
+    GROUP_LBI: load_group_lbi_model,
 }
 
 
@@ -120,4 +129,5 @@ __all__ = [
     "load_group_magnitude_model",
     "load_group_random_model",
     "load_group_saliency_model",
+    "load_group_lbi_model",
 ]

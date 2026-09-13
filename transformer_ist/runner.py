@@ -889,6 +889,16 @@ def run_single(
             "loss": copy.deepcopy(config["loss"]),
             "ist": copy.deepcopy(config["ist"]),
             "selection": copy.deepcopy(config["selection"]),
+            "requested_budget": (
+                None
+                if config["selection"] is None
+                else config["selection"]["requested_budget"]
+            ),
+            "requested_group_count": (
+                None
+                if config["selection"] is None
+                else config["selection"]["requested_group_count"]
+            ),
             "random_mask_index": config.get("random_mask_index"),
             "mask_seed": config.get("mask_seed"),
             "static_selection": static_selection,

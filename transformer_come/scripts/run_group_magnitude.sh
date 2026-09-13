@@ -10,7 +10,7 @@ source /home/nas3/biod/wangkangyi/transformer-tta/transformer_come/scripts/come_
 VARIANT=group_magnitude
 CONFIG_PATH="$PROJECT_ROOT/transformer_come/config.yaml"
 OUTPUT_ROOT=${COME_GROUP_MAGNITUDE_OUTPUT_ROOT:-$RESULTS_ROOT/transformer_come_otta_group_magnitude}
-GPUS=${COME_GROUP_MAGNITUDE_GPUS:-0,1,2,3,4,5,6,7}
+GPUS=${COME_GROUP_MAGNITUDE_GPUS:-0,1,2}
 DATASETS=${COME_GROUP_MAGNITUDE_DATASETS:-all}   # all | office31 | visda-c
 RHOS=${COME_GROUP_MAGNITUDE_RHOS:-all}
 DRY_RUN=${COME_DRY_RUN:-0}

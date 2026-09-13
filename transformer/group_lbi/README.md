@@ -128,6 +128,10 @@ and failure rate. For Office, `aggregate.json` and the CSV include an
 transfers; accuracy remains the required equal-transfer mean and is never
 sample- or batch-pooled.
 
+The Stage-1 cap is local to each online batch. A 3000-step cap hit is retained
+as a diagnostic and does not stop or invalidate the outer run: Stage 2, PU,
+all remaining online batches, and FO continue normally.
+
 A completed condition must have `budget_violation_rate=0` and
 `failure_rate=0`. NaN, Inf, or an online-batch exception aborts the condition
 and writes an `online_batch_failure` JSONL record plus failure diagnostics in

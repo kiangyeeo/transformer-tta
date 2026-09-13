@@ -424,11 +424,11 @@ Overshoot is never repaired by top-K trimming or filling.
 |---|---|---|
 | Final `S_t=K` | accept | valid |
 | `S_t<K` before cap | continue | undecided |
-| Step jumps from `<K` to `>K` | rollback to latest feasible state | budget-feasible; valid if no cap failure |
-| Cap reached while `S_t<K` | mark scientific-invalid and terminate the current run | **Stage-1 failure / invalid** |
+| Step jumps from `<K` to `>K` | rollback to latest feasible state | budget-feasible |
+| Cap reached while `S_t<K` | keep the last feasible support, finish the batch, and continue the stream | valid cap-hit diagnostic |
 | Any `S_t>K` after rollback | abort | budget violation / invalid |
 
-Exact-K is not required after a legitimate overshoot rollback. A hit at the fixed 3,000-step cap is scientific-invalid: after the current `run_batch()` returns, the runner records the invalid reason and termination batch, discards the condition from selection/formal reporting, performs no PU, and processes no subsequent target batches. In revision `8d878bc`, Stage 2 is internal to `run_batch()` and is therefore computed once for the invalidating batch before runner-level invalidation; that computation has no reportable scientific result and is discarded. The protocol does not claim that the invalidating batch avoids Stage-2 compute.
+Exact-K is not required after a legitimate overshoot rollback. A hit at the fixed 3,000-step cap remains explicitly recorded in per-batch and aggregate diagnostics, but it does not invalidate or terminate the run. Stage 2, same-batch PU, every later online batch, and the complete FO pass still execute.
 
 Initial safety cap:
 

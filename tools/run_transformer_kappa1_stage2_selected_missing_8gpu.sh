@@ -20,6 +20,9 @@ RESULT_ROOT="$STAGE2_ROOT/runs"
 STAMP="$(date -u +%Y%m%dT%H%M%S.%6NZ)"
 LAUNCH_ROOT="${LAUNCH_ROOT:-$STAGE2_ROOT/launchers/${ANCHOR_TAG}_missing96/launcher_${STAMP}}"
 DRY_RUN="${DRY_RUN:-0}"
+PREWARM_FIRST3_ONLY="${PREWARM_FIRST3_ONLY:-0}"
+GPU_IDLE_POLL_SECONDS="${GPU_IDLE_POLL_SECONDS:-30}"
+GPU_IDLE_CHECKS_REQUIRED="${GPU_IDLE_CHECKS_REQUIRED:-6}"
 
 export HF_HOME="/home/nas3/biod/wangkangyi/hf-cache"
 export TORCH_HOME="/home/nas3/biod/wangkangyi/hf-cache/torch"
@@ -36,6 +39,18 @@ cd "$PROJECT_DIR"
 [[ -f "$CONFIG" ]] || { echo "Missing config: $CONFIG" >&2; exit 1; }
 [[ "$DRY_RUN" == "0" || "$DRY_RUN" == "1" ]] || {
   echo "DRY_RUN must be 0 or 1" >&2
+  exit 1
+}
+[[ "$PREWARM_FIRST3_ONLY" == "0" || "$PREWARM_FIRST3_ONLY" == "1" ]] || {
+  echo "PREWARM_FIRST3_ONLY must be 0 or 1" >&2
+  exit 1
+}
+[[ "$GPU_IDLE_POLL_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "GPU_IDLE_POLL_SECONDS must be a positive integer" >&2
+  exit 1
+}
+[[ "$GPU_IDLE_CHECKS_REQUIRED" =~ ^[1-9][0-9]*$ ]] || {
+  echo "GPU_IDLE_CHECKS_REQUIRED must be a positive integer" >&2
   exit 1
 }
 
@@ -124,6 +139,48 @@ terminal_summary_exists() {
   local summary="$1"
   [[ -f "$summary" ]] &&
     grep -q '"status"[[:space:]]*:[[:space:]]*"completed"' "$summary"
+}
+
+gpu_compute_pids() {
+  local gpu="$1" output
+  output="$(nvidia-smi -i "$gpu" --query-compute-apps=pid --format=csv,noheader,nounits)" || return 1
+  printf '%s' "$output"
+}
+
+wait_for_gpus_012_idle() {
+  local consecutive=0 gpu pids
+  local -a busy=()
+
+  command -v nvidia-smi >/dev/null || {
+    echo "nvidia-smi is required for PREWARM_FIRST3_ONLY" >&2
+    return 1
+  }
+  echo "Waiting for GPU 0/1/2 to have no compute processes for $((GPU_IDLE_POLL_SECONDS * GPU_IDLE_CHECKS_REQUIRED)) consecutive seconds."
+  while (( consecutive < GPU_IDLE_CHECKS_REQUIRED )); do
+    busy=()
+    for gpu in 0 1 2; do
+      pids="$(gpu_compute_pids "$gpu")" || {
+        echo "Failed to query compute processes on GPU $gpu" >&2
+        return 1
+      }
+      if [[ -n "${pids//[[:space:]]/}" ]]; then
+        busy+=("GPU${gpu}:${pids//$'\n'/,}")
+      fi
+    done
+
+    if [[ "${#busy[@]}" -eq 0 ]]; then
+      consecutive=$((consecutive + 1))
+      echo "[idle-check $consecutive/$GPU_IDLE_CHECKS_REQUIRED] GPU 0/1/2 idle"
+    else
+      consecutive=0
+      echo "[waiting] busy compute processes: ${busy[*]}"
+    fi
+
+    if (( consecutive < GPU_IDLE_CHECKS_REQUIRED )); then
+      sleep "$GPU_IDLE_POLL_SECONDS"
+    fi
+  done
+  echo "GPU 0/1/2 passed the stable-idle gate."
 }
 
 combo_dir() {
@@ -295,6 +352,27 @@ echo "Conditions: 96 (VisDA .002: 12; VisDA .001: 12; Office .002: 72)"
 echo "Excluded as already complete: Office .002 alpha=.150 kappa=1 nu=1.00 (12 x 6 transfers)"
 echo "Scientific results: $RESULT_ROOT"
 echo "Launch plan/logs: $LAUNCH_ROOT"
+
+# Optional early mode used when only GPU 0/1/2 will become available.  It
+# waits instead of consuming GPU memory, launches C01-C03 together after the
+# stable-idle gate, and exits after those three tasks reach terminal state.
+if [[ "$PREWARM_FIRST3_ONLY" == "1" ]]; then
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "PREWARM dry-run: idle wait bypassed"
+  else
+    wait_for_gpus_012_idle
+  fi
+  for gpu in 0 1 2; do
+    launch_task "$gpu" visda002_prewarm "${COMBO_IDS[$gpu]}" visda-c train validation 0.002
+  done
+  wait_for_wave visda002_prewarm
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "PREWARM dry-run complete: three commands validated; no training was started."
+  else
+    echo "PREWARM complete: VisDA-C rho=.002 C01-C03 reached terminal state."
+  fi
+  exit 0
+fi
 
 # Wave 1: first eight rho=.002 VisDA-C combinations, one per GPU.
 for gpu in {0..7}; do

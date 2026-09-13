@@ -7,12 +7,30 @@ import json
 import statistics
 from pathlib import Path
 
+
 def _read(path: Path) -> dict:
     with open(path, "r", encoding="utf-8") as file_obj:
         value = json.load(file_obj)
     if value.get("status") != "completed":
         raise RuntimeError(f"incomplete IST result: {path}")
     return value
+
+
+def _requested_budget(summary: dict):
+    """Read both current and already-emitted sparse-summary schemas."""
+    top_level = summary.get("requested_budget")
+    selection = summary.get("selection")
+    nested = (
+        selection.get("requested_budget")
+        if isinstance(selection, dict)
+        else None
+    )
+    if top_level is not None and nested is not None and top_level != nested:
+        raise RuntimeError(
+            "IST summary has conflicting requested budgets: "
+            f"top-level={top_level}, selection={nested}"
+        )
+    return top_level if top_level is not None else nested
 
 
 def aggregate_matrix(run_root: Path) -> dict:
@@ -28,7 +46,7 @@ def aggregate_matrix(run_root: Path) -> dict:
                 "variant": summary["variant"],
                 "dataset": summary["dataset"],
                 "transfer": summary["transfer"],
-                "budget": summary.get("requested_budget"),
+                "budget": _requested_budget(summary),
                 "PU-Acc": summary["PU-Acc"],
                 "FO-Acc": summary["FO-Acc"],
                 "summary_path": str(

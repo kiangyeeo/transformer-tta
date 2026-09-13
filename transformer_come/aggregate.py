@@ -16,6 +16,7 @@ from .config import (
     IMPLEMENTATION_REVISIONS,
     PROTOCOL_REVISIONS,
     SPARSE_VARIANTS,
+    GROUP_LBI,
     TRANSFERS,
     require_supported_variant,
 )
@@ -52,6 +53,14 @@ def aggregate_matrix(
     result["method"] = "come"
     result["protocol_revision"] = PROTOCOL_REVISIONS[variant]
     result["implementation_revision"] = IMPLEMENTATION_REVISIONS[variant]
+    if variant == GROUP_LBI:
+        result["formal_eligible"] = all(
+            bool(row.get("lbi", {}).get("formal_eligible"))
+            for row in result["transfers"]
+        )
+        result["result_scope"] = (
+            "formal" if result["formal_eligible"] else "search_or_smoke_nonformal"
+        )
     return result
 
 

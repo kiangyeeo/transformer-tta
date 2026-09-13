@@ -13,15 +13,18 @@ from .config import (
     CHILDREN_PER_CONDITION,
     FORMAL_SEED,
     IMPLEMENTATION_REVISIONS,
+    GROUP_LBI,
     PROTOCOL_REVISIONS,
     RUN_PREFIXES,
     SPARSE_VARIANTS,
     SUPPORTED_VARIANTS,
     budget_tag,
     load_config,
+    lbi_cli_overrides,
     parse_budgets,
     parse_variants,
     resolve_transfer_config,
+    resolve_lbi_profile,
     select_transfers,
     variant_output_root,
 )
@@ -34,30 +37,36 @@ DEFAULT_CONFIG = Path(__file__).with_name("config.yaml")
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Protocol-aligned non-LBI COME-OTTA on the SHOT-Transformer substrate"
+            "Protocol-aligned COME-OTTA on the SHOT-Transformer substrate"
         )
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    transfer = subparsers.add_parser("transfer", help="run one formal condition")
+    transfer = subparsers.add_parser(
+        "transfer", help="run one resolved condition (formal or explicit LBI smoke/search)"
+    )
     transfer.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     transfer.add_argument("--variant", choices=SUPPORTED_VARIANTS, required=True)
-    transfer.add_argument("--dataset", required=True, choices=["office31", "visda-c"])
-    transfer.add_argument("--source", required=True)
-    transfer.add_argument("--target", required=True)
+    transfer.add_argument("--dataset", choices=["office31", "visda-c"])
+    transfer.add_argument("--source")
+    transfer.add_argument("--target")
     transfer.add_argument(
         "--budget",
         "--rho",
         dest="budget",
         type=float,
         help=(
-            "structural-group ratio rho, required by the sparse variants; "
-            "custom values are allowed"
+            "structural-group ratio rho, required by sparse variants; "
+            "Group-LBI requires a configured profile"
         ),
     )
     transfer.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     transfer.add_argument("--output-dir", type=Path)
     transfer.add_argument("--no-progress", action="store_true")
+    transfer.add_argument("--resume-run-dir", type=Path)
+    transfer.add_argument("--no-stream-checkpoint", action="store_true")
+    transfer.add_argument("--allow-provisional-lbi", action="store_true")
+    _add_lbi_arguments(transfer)
     transfer.add_argument(
         "--dry-run",
         action="store_true",
@@ -71,10 +80,14 @@ def _parser() -> argparse.ArgumentParser:
     matrix.add_argument(
         "--datasets", choices=["all", "office31", "visda-c"], default="all"
     )
+    matrix.add_argument("--no-stream-checkpoint", action="store_true")
+    matrix.add_argument("--allow-provisional-lbi", action="store_true")
+    matrix.add_argument("--resume-run-root", type=Path)
+    _add_lbi_arguments(matrix)
     matrix.add_argument(
         "--variants",
         default="all",
-        help="all or comma-separated non-LBI variants",
+        help="all or comma-separated COME variants",
     )
     matrix.add_argument(
         "--budgets",
@@ -125,7 +138,21 @@ def _single_output_dir(raw: dict, variant: str, dataset, source, target, budget)
     return path / dataset / f"{source}-{target}"
 
 
-def _resolve(raw, *, variant, dataset, source, target, budget, device, output_dir):
+def _add_lbi_arguments(parser: argparse.ArgumentParser) -> None:
+    for name in (
+        "alpha", "kappa", "nu", "omega", "stage2-lr",
+    ):
+        parser.add_argument(
+            f"--lbi-{name}",
+            dest="lbi_" + name.replace("-", "_"),
+            type=float,
+        )
+
+
+def _resolve(
+    raw, *, variant, dataset, source, target, budget, device, output_dir,
+    lbi_overrides=None, allow_provisional_lbi=False, stream_checkpoint=None,
+):
     return resolve_transfer_config(
         raw,
         project_root=PROJECT_ROOT,
@@ -136,6 +163,9 @@ def _resolve(raw, *, variant, dataset, source, target, budget, device, output_di
         budget=budget,
         device=device,
         output_dir=output_dir,
+        lbi_overrides=lbi_overrides,
+        allow_provisional_lbi=allow_provisional_lbi,
+        stream_checkpoint=stream_checkpoint,
     )
 
 
@@ -143,7 +173,10 @@ def _variant_budgets(variant: str, budgets):
     return budgets if variant in SPARSE_VARIANTS else None
 
 
-def _dry_run_plan(raw, config_path, variant, datasets, budgets, devices, output_root):
+def _dry_run_plan(
+    raw, config_path, variant, datasets, budgets, devices, output_root,
+    *, lbi_overrides=None, allow_provisional_lbi=False, stream_checkpoint=True,
+):
     from .matrix import condition_tasks, result_dir_for, validate_devices
 
     validate_devices(devices)
@@ -163,6 +196,9 @@ def _dry_run_plan(raw, config_path, variant, datasets, budgets, devices, output_
             output_dir=result_dir_for(
                 output_root / "DRY_RUN", dataset, source, target, budget
             ),
+            lbi_overrides=lbi_overrides,
+            allow_provisional_lbi=allow_provisional_lbi,
+            stream_checkpoint=stream_checkpoint,
         )
         task = {
             "dataset": dataset,
@@ -180,6 +216,9 @@ def _dry_run_plan(raw, config_path, variant, datasets, budgets, devices, output_
             ]
         if CHILDREN_PER_CONDITION[variant] > 1:
             task["mask_seeds"] = resolved["selection"]["mask_seeds"]
+        if variant == GROUP_LBI:
+            task["lbi"] = resolved["lbi"]
+            task["formal_eligible"] = resolved["lbi"]["formal_eligible"]
         tasks.append(task)
     plan = {
         "status": "validated",
@@ -212,6 +251,32 @@ def main(argv=None) -> int:
     raw = load_config(args.config)
 
     if args.command == "transfer":
+        if args.resume_run_dir is not None:
+            if args.variant != GROUP_LBI:
+                raise ValueError("Only group_lbi supports --resume-run-dir")
+            if args.no_stream_checkpoint:
+                raise ValueError("Group-LBI resume requires stream checkpointing")
+            if lbi_cli_overrides(args) or args.allow_provisional_lbi:
+                raise ValueError("Resume reuses the stored LBI identity and rejects overrides")
+            effective = args.resume_run_dir.resolve() / "effective_config.yaml"
+            with open(effective, "r", encoding="utf-8") as file_obj:
+                resolved = yaml.safe_load(file_obj)
+            resolved["output_dir"] = str(args.resume_run_dir.resolve())
+            if args.dry_run:
+                print(yaml.safe_dump(resolved, sort_keys=False, allow_unicode=True))
+                return 0
+            from .runner import run_transfer
+
+            run_transfer(
+                resolved, PROJECT_ROOT, show_progress=not args.no_progress, resume=True
+            )
+            return 0
+        missing = [
+            name for name in ("dataset", "source", "target")
+            if getattr(args, name) is None
+        ]
+        if missing:
+            raise ValueError(f"New transfer run is missing arguments: {missing}")
         output_dir = args.output_dir or _single_output_dir(
             raw, args.variant, args.dataset, args.source, args.target, args.budget
         )
@@ -224,6 +289,9 @@ def main(argv=None) -> int:
             budget=args.budget,
             device=args.device,
             output_dir=output_dir,
+            lbi_overrides=lbi_cli_overrides(args),
+            allow_provisional_lbi=args.allow_provisional_lbi,
+            stream_checkpoint=not args.no_stream_checkpoint,
         )
         if args.dry_run:
             print(yaml.safe_dump(resolved, sort_keys=False, allow_unicode=True))
@@ -235,7 +303,29 @@ def main(argv=None) -> int:
 
     variants = parse_variants(args.variants)
     budgets = parse_budgets(args.budgets)
+    if GROUP_LBI in variants and args.resume_run_root is None:
+        selected_datasets = (
+            ("office31", "visda-c")
+            if args.datasets == "all"
+            else (args.datasets,)
+        )
+        for dataset in selected_datasets:
+            for budget in budgets:
+                resolve_lbi_profile(
+                    raw,
+                    dataset,
+                    budget,
+                    overrides=lbi_cli_overrides(args),
+                    allow_provisional=args.allow_provisional_lbi,
+                )
     devices = [value.strip() for value in args.devices.split(",") if value.strip()]
+    if args.resume_run_root is not None:
+        if variants != (GROUP_LBI,):
+            raise ValueError("Matrix resume is supported only for group_lbi alone")
+        if args.output_root is not None or lbi_cli_overrides(args):
+            raise ValueError("Matrix resume reuses stored output/config and rejects overrides")
+        if args.allow_provisional_lbi or args.no_stream_checkpoint:
+            raise ValueError("Matrix resume reuses stored gate/checkpoint settings")
     if args.output_root is not None and len(variants) != 1:
         raise ValueError(
             "--output-root names one variant's artifact root; select exactly "
@@ -251,6 +341,8 @@ def main(argv=None) -> int:
     }
 
     if args.dry_run:
+        if args.resume_run_root is not None:
+            raise ValueError("--dry-run cannot be combined with --resume-run-root")
         plans = [
             _dry_run_plan(
                 raw,
@@ -260,6 +352,11 @@ def main(argv=None) -> int:
                 budgets,
                 devices,
                 output_roots[variant],
+                lbi_overrides=(lbi_cli_overrides(args) if variant == GROUP_LBI else {}),
+                allow_provisional_lbi=(
+                    args.allow_provisional_lbi if variant == GROUP_LBI else False
+                ),
+                stream_checkpoint=not args.no_stream_checkpoint,
             )
             for variant in variants
         ]
@@ -296,6 +393,12 @@ def main(argv=None) -> int:
             selection=args.datasets,
             devices=devices,
             budgets=_variant_budgets(variant, budgets),
+            lbi_overrides=(lbi_cli_overrides(args) if variant == GROUP_LBI else {}),
+            allow_provisional_lbi=(
+                args.allow_provisional_lbi if variant == GROUP_LBI else False
+            ),
+            stream_checkpoint=not args.no_stream_checkpoint,
+            resume_run_root=args.resume_run_root,
         )
     return 0
 

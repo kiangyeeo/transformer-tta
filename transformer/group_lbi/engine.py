@@ -318,7 +318,7 @@ class GroupSplitLBIEngine:
                 try:
                     stage1_loss, _ = _loss_and_parts(loss_closure())
                     if not torch.isfinite(stage1_loss):
-                        raise FloatingPointError("Stage-1 SHOT loss is NaN or Inf")
+                        raise FloatingPointError("Stage-1 host loss is NaN or Inf")
                     gradients = torch.autograd.grad(
                         stage1_loss,
                         [parameter for _, parameter in candidates],
@@ -343,6 +343,14 @@ class GroupSplitLBIEngine:
                     kappa=kappa,
                     nu=nu,
                 )
+                for state_name, values in (
+                    ("theta_delta", state.theta_delta),
+                    ("z", state.z),
+                ):
+                    if any(not torch.isfinite(value).all() for value in values.values()):
+                        raise FloatingPointError(
+                            f"Stage-1 {state_name} contains NaN or Inf"
+                        )
                 packed_gamma = group_soft_threshold(
                     pack_groups(state.z), kappa=kappa, prox_lambda=prox_lambda
                 )
@@ -399,8 +407,13 @@ class GroupSplitLBIEngine:
             optimizer.zero_grad(set_to_none=True)
             stage2_loss, stage2_parts = _loss_and_parts(loss_closure())
             if not torch.isfinite(stage2_loss):
-                raise FloatingPointError("Stage-2 SHOT loss is NaN or Inf")
+                raise FloatingPointError("Stage-2 host loss is NaN or Inf")
             stage2_loss.backward()
+            if any(
+                parameter.grad is None or not torch.isfinite(parameter.grad).all()
+                for _, parameter in candidates
+            ):
+                raise FloatingPointError("Stage-2 gradient contains NaN or Inf")
             strict_masked_adamw_step(optimizer, candidates, state.masks)
             assert_off_mask_adam_state_zero(optimizer, candidates, state.masks)
         finally:
@@ -408,12 +421,16 @@ class GroupSplitLBIEngine:
                 timing.stop("lbi_stage2", stage2_started)
 
         refined = _clone_map(candidates)
+        if any(not torch.isfinite(value).all() for value in refined.values()):
+            raise FloatingPointError("Stage-2 refined state contains NaN or Inf")
         for name, _ in candidates:
             if not torch.equal(refined[name][~state.masks[name]], base[name][~state.masks[name]]):
                 raise RuntimeError(f"Stage-2 off-mask value changed for {name}")
 
         omega = float(config["omega"])
         applied = omega_accumulation(base, refined, omega)
+        if any(not torch.isfinite(value).all() for value in applied.values()):
+            raise FloatingPointError("Persistent omega state contains NaN or Inf")
         _copy_map(candidates, applied)
         tolerance = float(config["delta_nonzero_tolerance"])
         effective_groups = changed_group_ids(refined, base, tolerance)
@@ -436,6 +453,15 @@ class GroupSplitLBIEngine:
             "stage1_last_feasible_step": feasible_step,
             "stage1_final_loss": stage1_loss_value,
             "stage2_steps_completed": 1,
+            "local_restart_count": 1,
+            "support_discovery_count": 1,
+            "stage2_optimizer_instance_count": 1,
+            "stage2_optimizer_step_count": 1,
+            "omega_writeback_count": 1,
+            "host_optimizer_persistent_step_count": 0,
+            "host_scheduler_step_count": 0,
+            "native_ema_commit_count": 0,
+            "objective_call_count": stage1_steps + 1,
             "stage2_lr": float(config["stage2_lr"]),
             "stage2_optimizer": "adamw",
             "stage2_final_loss": float(stage2_loss.detach().item()),

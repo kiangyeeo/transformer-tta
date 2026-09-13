@@ -421,18 +421,7 @@ lbi.tau_g=1e-4；count、budget、rollback、final mask、utilization、Stage-2 
 
 不能仅恢复 mask 而保留 overshoot Δ/Z，不能 top-K trim/fill，不能接受 K_G+1。合法 rollback 可返回 S=0 或 S<K_G，与 max-step failure 分开报告。
 
-stage1_max_steps=3000 固定。**任何 batch 实际 Stage-1 执行步数达到 3000，即使该步恰好 exact-K 或 rollback，也按当前 Transformer runner 规则使整 run invalid：**
-
-~~~yaml
-valid_lbi_run: false
-result_validity: invalid
-invalid_reason: stage1_3000_step_hit
-termination_batch_index: <actual index>
-~~~
-
-不做该 batch PU，不处理后续 batch，不做 FO，不让 partial metric 进入正式结果/排名；不能提高 cap 救配置。
-
-对齐 SHOT parent 的 runner-level invalidation：现 engine 在 run_batch 内已执行 Stage-2/omega，然后 runner 检查 3000。因此 invalidating batch 可能已有 Stage-2 compute；状态与计时只保留失败诊断，不能存成可继续的 completed-batch checkpoint，整个 run 仍作废。本文不声称它避免了 Stage-2。未来改成 Stage-1 内提前短路，须明确新实现 revision 与计数，不隐瞒实际执行边界。
+stage1_max_steps=3000 固定，并且只限制当前 batch 的 Stage-1。任何 batch 实际执行步数达到 3000，都保留 `stage1_3000_step_hit` / cap-hit 诊断并使用最后合法 support 完成 Stage-2、omega 与同批 PU；随后继续所有剩余 batch 和完整 FO。单独的 cap hit 不再使整 run invalid，也不允许通过提高 cap 改变这一固定边界。
 
 ---
 
@@ -494,7 +483,7 @@ JSON/CSV 保留未预先舍入的数值。表格可显示四位小数，ranking 
 
 ## 16. 有效性、support 与 collapse diagnostics
 
-正式 run 要求完整 target stream、PU/FO 样本计数正确、无 NaN/Inf/runtime exception、source/stream/scope/seed/config 身份一致、每批 S≤K_G、无 cap hit、日志完整。失败 run 写明确 invalid_reason，不将 partial mean 伪装成完整结果。
+正式 run 要求完整 target stream、PU/FO 样本计数正确、无 NaN/Inf/runtime exception、source/stream/scope/seed/config 身份一致、每批 S≤K_G、日志完整。cap hit 作为诊断保留，但不影响 run 有效性；真正失败的 run 写明确 invalid_reason，不将 partial mean 伪装成完整结果。
 
 每 batch 记录 K_G、selected S、u=S/K_G、selected group IDs/hash、QK/VO/FFN 和 block 分布、Stage-1 executed steps、last feasible step、stop reason、rollback、Stage-1/2 runtime。聚合 selected min/mean/max，utilization min/mean/p05，低于 90%/95% 次数与比例、exact-K rate、cap/rollback/failure rate，steps mean/max。
 

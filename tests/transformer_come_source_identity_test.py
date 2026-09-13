@@ -90,7 +90,8 @@ def main() -> int:
         "candidate_dense", Path("/tmp/come-c01-candidate")
     )
 
-    # Same source W0, same provenance, different scientific identity.
+    # Same source W0/provenance/substrate, with the documented v2 host-LR
+    # difference contributing to a distinct scientific identity.
     for field in (
         "checkpoint_path",
         "checkpoint_sha256",
@@ -105,9 +106,13 @@ def main() -> int:
         "workers",
         "preprocessing",
         "stream",
-        "optimization",
     ):
         assert shot[field] == come[field], field
+    assert shot["optimization"] == {
+        **come["optimization"],
+        "lr": 1.0e-5,
+    }
+    assert come["optimization"]["lr"] == 1.0e-7
     assert come["checkpoint_sha256"] == come_candidate["checkpoint_sha256"]
     assert shot["scientific_config_sha256"] != come["scientific_config_sha256"]
     assert shot["method"] == "shot" and come["method"] == "come"

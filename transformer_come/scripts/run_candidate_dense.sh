@@ -9,7 +9,7 @@ source /home/nas3/biod/wangkangyi/transformer-tta/transformer_come/scripts/come_
 VARIANT=candidate_dense
 CONFIG_PATH="$PROJECT_ROOT/transformer_come/config.yaml"
 OUTPUT_ROOT=${COME_CANDIDATE_DENSE_OUTPUT_ROOT:-$RESULTS_ROOT/transformer_come_otta_candidate_dense}
-GPUS=${COME_CANDIDATE_DENSE_GPUS:-0,1,2,3,4,5,6,7}
+GPUS=${COME_CANDIDATE_DENSE_GPUS:-0,1,2}
 DATASETS=${COME_CANDIDATE_DENSE_DATASETS:-all}   # all | office31 | visda-c
 DRY_RUN=${COME_DRY_RUN:-0}
 

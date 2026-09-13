@@ -326,8 +326,33 @@ def run_transfer(
     show_progress: bool = True,
     resume: bool = False,
     model_loader=load_group_lbi_model,
+    objective_fn=None,
+    method: str = "shot",
+    protocol_document: str | None = None,
+    implementation_revision: str | None = None,
+    batch_guard=None,
+    objective_artifact_key: str = "loss",
+    target_loaders_builder=build_target_loaders,
+    summary_enricher=None,
+    artifact_extra: dict | None = None,
+    engine_factory=GroupSplitLBIEngine,
 ) -> dict:
-    """Run exactly one transfer/budget Group-LBI condition."""
+    """Run exactly one transfer/budget Group-LBI condition.
+
+    ``objective_fn`` is the intentionally small host-objective seam shared by
+    SHOT and COME.  It receives ``(model, images, config)`` and returns either
+    a differentiable scalar loss or ``(loss, detached_diagnostics)``.  The
+    Group Split-LBI state machine, Stage-2 optimizer, stream and PU/FO logic
+    remain this module's single implementation.
+    """
+    if objective_fn is None:
+        objective_fn = lambda current_model, current_images, current_config: shot_loss(
+            current_model(current_images), current_config["loss"]
+        )
+    if objective_artifact_key not in config:
+        raise ValueError(
+            f"Group-LBI config is missing host objective block {objective_artifact_key!r}"
+        )
     output_dir = Path(config["output_dir"])
     if resume:
         if not output_dir.is_dir():
@@ -358,16 +383,29 @@ def run_transfer(
         "dataset": config["dataset"],
         "transfer": config["transfer"],
         "formal_seed": config["formal_seed"],
-        "method": "shot",
+        "method": method,
         "variant": "group_lbi",
         "target_labels_usage": "PU/FO metrics only; never passed to loss or engine",
         "adaptation": copy.deepcopy(config["adaptation"]),
         "selection": copy.deepcopy(config["selection"]),
         "lbi": copy.deepcopy(config["lbi"]),
         "stage2_optimization": copy.deepcopy(config["stage2_optimization"]),
-        "loss": copy.deepcopy(config["loss"]),
+        objective_artifact_key: copy.deepcopy(config[objective_artifact_key]),
         "resume_used": bool(resume),
     }
+    if protocol_document is not None:
+        base_manifest["protocol_document"] = protocol_document
+    if implementation_revision is not None:
+        base_manifest["implementation_revision"] = implementation_revision
+    if artifact_extra:
+        base_manifest.update(copy.deepcopy(artifact_extra))
+    if "formal_eligible" in config["lbi"]:
+        base_manifest["formal_eligible"] = bool(config["lbi"]["formal_eligible"])
+        base_manifest["result_scope"] = (
+            "formal"
+            if base_manifest["formal_eligible"]
+            else "search_or_smoke_nonformal"
+        )
     _atomic_json(paths["manifest"], base_manifest)
 
     failure_context = {
@@ -407,7 +445,7 @@ def run_transfer(
         source_candidate_values = _clone_candidate_values(candidates)
         frozen_hash_before = hash_tensors(frozen_named_state(model, candidate_name_set))
         classifier_hash_before = _classifier_hash(model)
-        online_loader, fo_loader, stream_record = build_target_loaders(config)
+        online_loader, fo_loader, stream_record = target_loaders_builder(config)
         failure_context["target_batch_count"] = len(online_loader)
         set_reproducibility(config["formal_seed"], config["runtime"]["deterministic"])
 
@@ -437,7 +475,7 @@ def run_transfer(
                 previous_handlers[signum] = signal.getsignal(signum)
                 signal.signal(signum, request_interruption)
 
-        engine = GroupSplitLBIEngine()
+        engine = engine_factory()
         progress = tqdm(
             online_loader,
             desc=(
@@ -458,6 +496,8 @@ def run_transfer(
                 resume_rng_state = None
             failure_context["phase"] = "online_adaptation"
             failure_context["batch_index"] = batch_index
+            if batch_guard is not None:
+                batch_guard(int(images.shape[0]))
             images = images.to(device, non_blocking=True)
             _sync(device)
             if device.type == "cuda":
@@ -477,7 +517,7 @@ def run_transfer(
                     )
 
             def loss_closure():
-                return shot_loss(model(images), config["loss"])
+                return objective_fn(model, images, config)
 
             engine_config = {
                 **config["lbi"],
@@ -503,70 +543,8 @@ def run_transfer(
             if _classifier_hash(model) != classifier_hash_before:
                 raise RuntimeError("Frozen classifier changed during Group-LBI")
 
-            if step_record["stage1_steps_completed"] == 3000:
-                histories["adapt_runtimes"].append(adapt_runtime)
-                histories["stage1_runtimes"].append(
-                    float(timing.values.get("lbi_stage1", 0.0))
-                )
-                histories["stage2_runtimes"].append(
-                    float(timing.values.get("lbi_stage2", 0.0))
-                )
-                histories["step_records"].append(step_record)
-                selection_summary = _selection_summary(
-                    histories["step_records"],
-                    stage1_step_cap=int(config["lbi"]["stage1_max_steps"]),
-                )
-                completed_at = _utc_now()
-                invalid_summary = {
-                    **base_manifest,
-                    "status": "completed",
-                    "valid_lbi_run": False,
-                    "result_validity": "invalid",
-                    "invalid_reason": "stage1_3000_step_hit",
-                    "terminated_early": True,
-                    "termination_batch_index": batch_index,
-                    "completed_online_batch_count": completed_batches,
-                    "selection": {
-                        **copy.deepcopy(config["selection"]),
-                        **selection_summary,
-                    },
-                    "stream": stream_record,
-                    "completed_at_utc": completed_at,
-                    "wall_runtime_sec": float(
-                        prior_wall_runtime + time.perf_counter() - segment_started
-                    ),
-                    "output_dir": str(output_dir),
-                }
-                _append_jsonl(
-                    paths["metrics"],
-                    {
-                        "schema_version": ARTIFACT_SCHEMA_VERSION,
-                        "event": "experiment_invalidated",
-                        "batch_index": batch_index,
-                        "reason": "stage1_3000_step_hit",
-                        **step_record,
-                    },
-                )
-                _atomic_json(paths["summary"], invalid_summary)
-                _atomic_json(
-                    paths["manifest"],
-                    {
-                        **invalid_summary,
-                        "adapted_model_saved": False,
-                        "stream_checkpoint_removed_after_completion": bool(
-                            config["checkpointing"]["enabled"]
-                        ),
-                    },
-                )
-                _remove_checkpoint(output_dir)
-                progress.close()
-                print(
-                    f"[{config['dataset']} {config['transfer']}] invalid: "
-                    f"batch {batch_index} hit 3000 Stage-1 steps; stopping early",
-                    flush=True,
-                )
-                return invalid_summary
-
+            # The Stage-1 step cap is batch-local. Even a 3,000-step hit must
+            # proceed through PU/bookkeeping so the outer stream and FO finish.
             pu_started = time.perf_counter()
             failure_context["phase"] = "online_pu"
             with torch.inference_mode():
@@ -750,7 +728,17 @@ def run_transfer(
             "valid_lbi_run": True,
             "result_validity": "valid",
             "protocol_revision": config["protocol_revision"],
-            "method": "shot",
+            **(
+                {"protocol_document": protocol_document}
+                if protocol_document is not None
+                else {}
+            ),
+            **(
+                {"implementation_revision": implementation_revision}
+                if implementation_revision is not None
+                else {}
+            ),
+            "method": method,
             "variant": "group_lbi",
             "dataset": config["dataset"],
             "source": config["source"],
@@ -768,8 +756,20 @@ def run_transfer(
             "adaptation": copy.deepcopy(config["adaptation"]),
             "selection": {**copy.deepcopy(config["selection"]), **selection_summary},
             "lbi": copy.deepcopy(config["lbi"]),
+            **(
+                {
+                    "formal_eligible": bool(config["lbi"]["formal_eligible"]),
+                    "result_scope": (
+                        "formal"
+                        if config["lbi"]["formal_eligible"]
+                        else "search_or_smoke_nonformal"
+                    ),
+                }
+                if "formal_eligible" in config["lbi"]
+                else {}
+            ),
             "stage2_optimization": copy.deepcopy(config["stage2_optimization"]),
-            "loss": copy.deepcopy(config["loss"]),
+            objective_artifact_key: copy.deepcopy(config[objective_artifact_key]),
             "preprocessing": copy.deepcopy(config["preprocessing"]),
             **scope_record,
             "requested_budget": config["selection"]["requested_budget"],
@@ -815,6 +815,12 @@ def run_transfer(
             ),
             "environment": _environment(device),
             "output_dir": str(output_dir),
+            **copy.deepcopy(artifact_extra or {}),
+            **(
+                summary_enricher(histories["step_records"])
+                if summary_enricher is not None
+                else {}
+            ),
         }
         _append_jsonl(paths["metrics"], {"schema_version": ARTIFACT_SCHEMA_VERSION, "event": "final", **summary})
         _atomic_json(paths["summary"], summary)
@@ -908,6 +914,10 @@ def run_transfer(
         failure = {
             **base_manifest,
             "status": "failed",
+            "result_validity": "invalid",
+            "invalid_reason": str(
+                getattr(error, "invalid_reason", "runtime_exception")
+            ),
             "completed_at_utc": _utc_now(),
             "error_type": type(error).__name__,
             "error": str(error),

@@ -68,6 +68,10 @@ def run_matrix(
     selection: str,
     devices: list[str],
     budgets=None,
+    lbi_overrides=None,
+    allow_provisional_lbi: bool = False,
+    stream_checkpoint: bool = True,
+    resume_run_root: Path | None = None,
 ) -> Path:
     """Schedule every selected condition, then aggregate the real artifacts."""
 
@@ -79,15 +83,39 @@ def run_matrix(
     transfers = list(select_transfers(selection))
     tasks = condition_tasks(transfers, budgets)
     validate_devices(devices)
-    run_root = new_run_root(output_root, variant)
+    if resume_run_root is not None and variant != "group_lbi":
+        raise ValueError("Matrix resume is supported only for group_lbi")
+    run_root = (
+        resume_run_root.resolve()
+        if resume_run_root is not None
+        else new_run_root(output_root, variant)
+    )
+    if resume_run_root is not None and not run_root.is_dir():
+        raise FileNotFoundError(f"Matrix resume root does not exist: {run_root}")
     logs_root = run_root / "logs"
-    logs_root.mkdir()
-    pending = list(tasks)
+    logs_root.mkdir(exist_ok=resume_run_root is not None)
+    pending = []
+    already_completed = 0
+    for task in tasks:
+        dataset, source, target, budget = task
+        result_dir = result_dir_for(run_root, dataset, source, target, budget)
+        summary_path = result_dir / "summary.json"
+        if resume_run_root is not None and summary_path.is_file():
+            with open(summary_path, "r", encoding="utf-8") as file_obj:
+                completed_summary = json.load(file_obj)
+            if (
+                completed_summary.get("status") == "completed"
+                and completed_summary.get("valid_lbi_run") is not False
+            ):
+                already_completed += 1
+                continue
+        pending.append(task)
     available = list(devices)
     active: dict[str, dict] = {}
     failures: list[dict] = []
     progress = tqdm(
-        total=len(tasks), desc=f"come {variant} matrix", unit="condition"
+        total=len(tasks), initial=already_completed,
+        desc=f"come {variant} matrix", unit="condition"
     )
 
     while pending or active:
@@ -99,31 +127,60 @@ def run_matrix(
                 task_name = f"{budget_tag(budget)}_{task_name}"
             result_dir = result_dir_for(run_root, dataset, source, target, budget)
             log_path = logs_root / f"{task_name}.log"
-            log_handle = open(log_path, "w", encoding="utf-8")
-            command = [
-                sys.executable,
-                "-m",
-                "transformer_come",
-                "transfer",
-                "--config",
-                str(config_path),
-                "--variant",
-                variant,
-                "--dataset",
-                dataset,
-                "--source",
-                source,
-                "--target",
-                target,
-            ]
-            if budget is not None:
-                command += ["--budget", str(budget)]
-            command += [
-                "--device",
-                "cpu" if assigned == "cpu" else "cuda",
-                "--output-dir",
-                str(result_dir),
-            ]
+            checkpoint_state = result_dir / ".stream_checkpoint" / "state.pt"
+            resuming_condition = resume_run_root is not None and checkpoint_state.is_file()
+            log_handle = open(
+                log_path, "a" if resuming_condition else "w", encoding="utf-8"
+            )
+            if resume_run_root is not None and result_dir.exists() and not resuming_condition:
+                log_handle.close()
+                failures.append({
+                    "task": task_name,
+                    "returncode": None,
+                    "log_path": str(log_path),
+                    "error": "existing incomplete condition has no resumable checkpoint",
+                })
+                available.append(assigned)
+                progress.update(1)
+                continue
+            if resuming_condition:
+                command = [
+                    sys.executable, "-m", "transformer_come", "transfer",
+                    "--variant", "group_lbi", "--resume-run-dir", str(result_dir),
+                ]
+            else:
+                command = [
+                    sys.executable,
+                    "-m",
+                    "transformer_come",
+                    "transfer",
+                    "--config",
+                    str(config_path),
+                    "--variant",
+                    variant,
+                    "--dataset",
+                    dataset,
+                    "--source",
+                    source,
+                    "--target",
+                    target,
+                ]
+            if not resuming_condition:
+                if budget is not None:
+                    command += ["--budget", str(budget)]
+                if variant == "group_lbi":
+                    for key, value in (lbi_overrides or {}).items():
+                        command += ["--lbi-" + key.replace("_", "-"), str(value)]
+                    if allow_provisional_lbi:
+                        command.append("--allow-provisional-lbi")
+                    if not stream_checkpoint:
+                        command.append("--no-stream-checkpoint")
+                command += [
+                    "--device",
+                    "cpu" if assigned == "cpu" else "cuda",
+                    "--output-dir",
+                    str(result_dir),
+                ]
             environment = os.environ.copy()
             environment.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
             if assigned != "cpu":
@@ -176,11 +233,17 @@ def run_matrix(
         "formal_seed": FORMAL_SEED,
         "devices": devices,
         "condition_count": len(tasks),
+        "already_completed_before_resume": already_completed,
+        "resume_run_root": str(run_root) if resume_run_root is not None else None,
         "one_process_per_device": True,
         "failures": failures,
     }
     if budgets is not None:
         matrix_record["budgets"] = list(budgets)
+    if variant == "group_lbi":
+        matrix_record["lbi_overrides"] = dict(lbi_overrides or {})
+        matrix_record["allow_provisional_lbi"] = bool(allow_provisional_lbi)
+        matrix_record["stream_checkpoint_enabled"] = bool(stream_checkpoint)
     if CHILDREN_PER_CONDITION[variant] > 1:
         matrix_record["child_run_count"] = len(tasks) * CHILDREN_PER_CONDITION[variant]
     with open(run_root / "matrix.json", "w", encoding="utf-8") as file_obj:

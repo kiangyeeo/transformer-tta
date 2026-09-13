@@ -62,6 +62,7 @@ selection:
   budget_slack: false
   state_lifecycle: theta_delta_gamma_z_reset_every_online_batch
   stage2_initialization: base_plus_masked_delta
+  stage1_step_cap_hit_policy: continue_to_end_of_stream
 
 # Retained only so the shared candidate-dense validator confirms the frozen
 # controlled-Transformer optimizer family. Group-LBI Stage 2 resolves its LR

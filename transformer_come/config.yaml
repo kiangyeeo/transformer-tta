@@ -1,11 +1,13 @@
 # DeiT-S COME-OTTA: SHOT-Transformer substrate + COME current-logit objective.
 #
-# One frozen config for all five non-LBI variants.  The variant is chosen with
+# One frozen config for the five baseline variants and the implementation-ready
+# Group-LBI path.  Group-LBI profiles remain provisional and fail closed unless
+# a search/smoke invocation explicitly opts in.
 # --variant; its protocol revision, update scope and structural-group selection
 # policy are derived in config.py rather than duplicated here, so a variant
 # cannot silently acquire a different substrate.
 schema_version: 1
-protocol_document: OTTA_COME_TRANSFORMER_LBI_PROTOCOL_20260909_v1
+protocol_document: transformer_come/OTTA_COME_TRANSFORMER_LBI_PROTOCOL_20260911_v2.md
 method: come
 formal_seed: 2026
 
@@ -41,10 +43,20 @@ data:
 
 optimization:
   optimizer: adamw
-  lr: 1.0e-5
+  lr: 1.0e-7
   betas: [0.9, 0.999]
   eps: 1.0e-8
   weight_decay: 0.01
+
+stage2_optimization:
+  optimizer: adamw
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.01
+  steps: 1
+  lr_schedule: none
+  strict_off_mask_value_freezing: true
+  clear_off_mask_coordinate_state: [exp_avg, exp_avg_sq]
 
 come:
   objective: come_entropy_of_opinion
@@ -64,6 +76,38 @@ runtime:
   deterministic: true
   amp: false
   pin_memory: true
+
+checkpointing:
+  enabled_by_default: true
+  granularity: completed_online_batch
+  save_adapted_model: false
+
+diagnostics:
+  delta_nonzero_tolerance: 1.0e-12
+  progress_refresh_steps: 25
+
+# These values are implementation/search anchors only. Formal resolution is
+# rejected until every dataset x budget record is changed to status: frozen by
+# an explicit, predeclared search protocol.
+lbi_profiles:
+  office31:
+    "0.0005": &come_lbi_provisional
+      status: provisional_default
+      parameters:
+        alpha: 0.1
+        kappa: 1.0
+        nu: 1.0
+        omega: 0.1
+        prox_lambda: 1.0
+        tau_g: 1.0e-4
+        stage1_max_steps: 3000
+        stage2_lr: 1.0e-5
+    "0.001": *come_lbi_provisional
+    "0.002": *come_lbi_provisional
+  visda-c:
+    "0.0005": *come_lbi_provisional
+    "0.001": *come_lbi_provisional
+    "0.002": *come_lbi_provisional
 
 output:
   root: /home/nas3/biod/wangkangyi/results

@@ -1,24 +1,28 @@
 """Fail-closed COME-Transformer configuration, budgets and experiment identity.
 
-One module resolves every non-LBI variant.  The substrate - source W0 loading,
+One module resolves every COME variant.  The substrate - source W0 loading,
 the target stream, the 12-tensor candidate universe, the 6912 QK/VO/FFN paired
 groups, the floor budgets 3/6/13 and the rho tags - is imported from the SHOT
 ``transformer`` packages rather than reimplemented, so COME and SHOT run on
-literally the same code objects and only the host objective differs.
+literally the same code objects.  Protocol v2 deliberately gives COME its own
+host LR (1e-7 rather than SHOT's 1e-5), so the host objective and LR are the
+two frozen scientific differences.
 
-The frozen YAML carries the blocks that are common to all five variants.  The
+The frozen YAML carries common blocks and explicit Group-LBI profiles. The
 per-variant blocks (protocol revision, update scope, structural-group selection
 policy, artifact root) are derived here by :func:`variant_config_view`, which
 rebuilds exactly the per-variant config a variant used to own.  Deriving them
 means a variant cannot acquire a different substrate through a YAML edit;
 ``tests/transformer_come_substrate_identity_test.py`` still compares every
-derived block against the matching SHOT YAML, so drift from SHOT stays caught.
+derived block against the matching SHOT YAML, allowing only the documented
+COME objective, saliency-ranking source and host-LR differences.
 """
 
 from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -72,8 +76,9 @@ CANDIDATE_DENSE = "candidate_dense"
 GROUP_RANDOM = "group_random"
 GROUP_MAGNITUDE = "group_magnitude"
 GROUP_SALIENCY = "group_saliency"
+GROUP_LBI = "group_lbi"
 DENSE_VARIANTS = (FULL_DENSE, CANDIDATE_DENSE)
-SPARSE_VARIANTS = (GROUP_RANDOM, GROUP_MAGNITUDE, GROUP_SALIENCY)
+SPARSE_VARIANTS = (GROUP_RANDOM, GROUP_MAGNITUDE, GROUP_SALIENCY, GROUP_LBI)
 SUPPORTED_VARIANTS = DENSE_VARIANTS + SPARSE_VARIANTS
 
 
@@ -82,17 +87,23 @@ SUPPORTED_VARIANTS = DENSE_VARIANTS + SPARSE_VARIANTS
 # must not reuse the SHOT-Transformer revisions or the ResNet/FC COME revisions
 # (``come_otta_baseline_20260908_v2`` / ``come_otta_sparse_lbi_20260908_v3``),
 # which describe a different substrate.
-PROTOCOL_DOCUMENT = "OTTA_COME_TRANSFORMER_LBI_PROTOCOL_20260909_v1"
+PROTOCOL_DOCUMENT = (
+    "transformer_come/OTTA_COME_TRANSFORMER_LBI_PROTOCOL_20260911_v2.md"
+)
+GROUP_LBI_PROTOCOL_DOCUMENT = (
+    "transformer_come/OTTA_COME_TRANSFORMER_GROUP_LBI_PROTOCOL_20260913_v1.md"
+)
 
-BASELINE_IMPLEMENTATION_REVISION = "come_transformer_baseline_20260909_v1"
-SPARSE_LBI_IMPLEMENTATION_REVISION = "come_transformer_sparse_lbi_20260909_v1"
+BASELINE_IMPLEMENTATION_REVISION = "come_transformer_baseline_20260911_v2"
+SPARSE_LBI_IMPLEMENTATION_REVISION = "come_transformer_sparse_lbi_20260911_v2"
 
 PROTOCOL_REVISIONS = {
-    FULL_DENSE: "come_transformer_full_dense_otta_20260909_v1",
-    CANDIDATE_DENSE: "come_transformer_candidate_dense_otta_20260909_v1",
-    GROUP_RANDOM: "come_transformer_group_random_otta_20260909_v1",
-    GROUP_MAGNITUDE: "come_transformer_group_magnitude_otta_20260909_v1",
-    GROUP_SALIENCY: "come_transformer_group_saliency_otta_20260909_v1",
+    FULL_DENSE: "come_transformer_full_dense_otta_20260911_v2",
+    CANDIDATE_DENSE: "come_transformer_candidate_dense_otta_20260911_v2",
+    GROUP_RANDOM: "come_transformer_group_random_otta_20260911_v2",
+    GROUP_MAGNITUDE: "come_transformer_group_magnitude_otta_20260911_v2",
+    GROUP_SALIENCY: "come_transformer_group_saliency_otta_20260911_v2",
+    GROUP_LBI: "come_transformer_group_lbi_otta_20260913_v1",
 }
 
 IMPLEMENTATION_REVISIONS = {
@@ -101,6 +112,16 @@ IMPLEMENTATION_REVISIONS = {
     GROUP_RANDOM: SPARSE_LBI_IMPLEMENTATION_REVISION,
     GROUP_MAGNITUDE: SPARSE_LBI_IMPLEMENTATION_REVISION,
     GROUP_SALIENCY: SPARSE_LBI_IMPLEMENTATION_REVISION,
+    GROUP_LBI: "come_transformer_sparse_lbi_20260913_v1",
+}
+
+PROTOCOL_DOCUMENTS = {
+    **{
+        variant: PROTOCOL_DOCUMENT
+        for variant in DENSE_VARIANTS
+        + (GROUP_RANDOM, GROUP_MAGNITUDE, GROUP_SALIENCY)
+    },
+    GROUP_LBI: GROUP_LBI_PROTOCOL_DOCUMENT,
 }
 
 VARIANT_KEYS = {
@@ -109,6 +130,7 @@ VARIANT_KEYS = {
     GROUP_RANDOM: "group-random",
     GROUP_MAGNITUDE: "group-magnitude",
     GROUP_SALIENCY: "group-saliency",
+    GROUP_LBI: "group-lbi",
 }
 
 RUN_PREFIXES = {
@@ -174,7 +196,7 @@ EXPECTED_STREAM = {
 }
 EXPECTED_OPTIMIZATION = {
     "optimizer": "adamw",
-    "lr": 1.0e-5,
+    "lr": 1.0e-7,
     "betas": [0.9, 0.999],
     "eps": 1.0e-8,
     "weight_decay": 0.01,
@@ -201,6 +223,7 @@ ADAPTATION_BLOCKS = {
     GROUP_RANDOM: CANDIDATE_ADAPTATION,
     GROUP_MAGNITUDE: CANDIDATE_ADAPTATION,
     GROUP_SALIENCY: CANDIDATE_ADAPTATION,
+    GROUP_LBI: CANDIDATE_ADAPTATION,
 }
 
 RANDOM_SELECTION = {
@@ -250,19 +273,61 @@ SALIENCY_SELECTION = {
     "ranking_source": "current_pre_update_weight_and_current_come_gradient",
     "mask_refresh_policy": "every_online_batch_after_backward_before_step",
 }
+LBI_SELECTION = {
+    "type": "group_split_lbi",
+    "group_order": "block_then_qk_vo_ffn_then_coordinate",
+    "total_groups": TOTAL_GROUPS,
+    "group_size": GROUP_SIZE,
+    "budgets": list(FORMAL_BUDGETS),
+    "integer_rule": "floor",
+    "integer_budgets": [BUDGET_TO_K[item] for item in FORMAL_BUDGETS],
+    "support_measure": "gamma_group_l2_div_sqrt_group_size",
+    "strict_rollback": True,
+    "topk_trim": False,
+    "budget_slack": False,
+    "state_lifecycle": "theta_delta_gamma_z_reset_every_online_batch",
+    "stage2_initialization": "base_plus_masked_delta",
+    "stage1_step_cap_hit_policy": "continue_to_end_of_stream",
+}
 SELECTION_BLOCKS = {
     GROUP_RANDOM: RANDOM_SELECTION,
     GROUP_MAGNITUDE: MAGNITUDE_SELECTION,
     GROUP_SALIENCY: SALIENCY_SELECTION,
+    GROUP_LBI: LBI_SELECTION,
 }
 
 # Saliency records the per-step active scalar count, because its support is
 # rebuilt every online batch instead of once before the stream.
 PER_STEP_SCALARS = (GROUP_SALIENCY,)
 
+LBI_PROFILE_FIELDS = (
+    "alpha", "kappa", "nu", "omega", "prox_lambda", "tau_g",
+    "stage1_max_steps", "stage2_lr",
+)
+EXPECTED_STAGE2_OPTIMIZATION = {
+    "optimizer": "adamw",
+    "betas": [0.9, 0.999],
+    "eps": 1.0e-8,
+    "weight_decay": 0.01,
+    "steps": 1,
+    "lr_schedule": "none",
+    "strict_off_mask_value_freezing": True,
+    "clear_off_mask_coordinate_state": ["exp_avg", "exp_avg_sq"],
+}
+EXPECTED_CHECKPOINTING = {
+    "enabled_by_default": True,
+    "granularity": "completed_online_batch",
+    "save_adapted_model": False,
+}
+EXPECTED_DIAGNOSTICS = {
+    "delta_nonzero_tolerance": 1.0e-12,
+    "progress_refresh_steps": 25,
+}
+
 NON_SCIENTIFIC_KEYS = {
     "output_dir",
     "checkpoint_manifest_path",
+    "checkpointing",
     "scientific_config_sha256",
     "experiment_key",
 }
@@ -300,14 +365,96 @@ def load_config(path: str | os.PathLike[str]) -> dict[str, Any]:
 
 
 def require_supported_variant(variant: str) -> str:
-    if variant == "group_lbi":
-        raise ValueError(
-            "group_lbi is intentionally not implemented in this revision: the "
-            "COME-LBI search protocol and its six tuples are not frozen"
-        )
     if variant not in SUPPORTED_VARIANTS:
         raise ValueError(f"variant must be one of {SUPPORTED_VARIANTS}")
     return variant
+
+
+def validate_lbi_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """Validate one complete, batch-local COME Group-LBI tuple."""
+
+    if not isinstance(profile, dict) or set(profile) != set(LBI_PROFILE_FIELDS):
+        actual = set(profile) if isinstance(profile, dict) else set()
+        raise ValueError(
+            "LBI profile fields differ from the frozen schema: "
+            f"{sorted(actual ^ set(LBI_PROFILE_FIELDS))}"
+        )
+    result = copy.deepcopy(profile)
+    for key in LBI_PROFILE_FIELDS:
+        if key == "stage1_max_steps":
+            continue
+        value = float(result[key])
+        if not math.isfinite(value):
+            raise ValueError(f"lbi.{key} must be finite")
+        result[key] = value
+    if result["alpha"] <= 0 or result["kappa"] <= 0 or result["nu"] <= 0:
+        raise ValueError("lbi alpha, kappa and nu must be > 0")
+    if result["prox_lambda"] <= 0 or result["tau_g"] <= 0:
+        raise ValueError("lbi prox_lambda and tau_g must be > 0")
+    if result["stage2_lr"] <= 0:
+        raise ValueError("lbi stage2_lr must be > 0")
+    if not 0.0 <= result["omega"] <= 1.0:
+        raise ValueError("lbi.omega must be in [0, 1]")
+    steps = result["stage1_max_steps"]
+    if isinstance(steps, bool) or int(steps) != steps or int(steps) <= 0:
+        raise ValueError("lbi.stage1_max_steps must be a positive integer")
+    result["stage1_max_steps"] = int(steps)
+    if result["prox_lambda"] != 1.0:
+        raise ValueError("COME Group-LBI prox_lambda is frozen to 1.0")
+    if result["tau_g"] != 1.0e-4:
+        raise ValueError("COME Group-LBI tau_g is frozen to 1e-4")
+    if result["stage1_max_steps"] != 3000:
+        raise ValueError("COME Group-LBI stage1_max_steps is frozen to 3000")
+    return result
+
+
+def lbi_cli_overrides(args) -> dict[str, Any]:
+    return {
+        key: getattr(args, f"lbi_{key}")
+        for key in LBI_PROFILE_FIELDS
+        if getattr(args, f"lbi_{key}", None) is not None
+    }
+
+
+def resolve_lbi_profile(
+    raw_config: dict[str, Any],
+    dataset: str,
+    budget: float | str,
+    *,
+    overrides: dict[str, Any] | None = None,
+    allow_provisional: bool = False,
+) -> dict[str, Any]:
+    """Resolve a dataset/budget tuple and enforce the formal-run gate.
+
+    The checked-in tuples are deliberately provisional: implementation and
+    smoke runs may opt in, while an ordinary (formal) resolution fails closed
+    until the separately specified search freezes all six tuples.
+    """
+
+    dataset_profiles = raw_config.get("lbi_profiles", {}).get(dataset)
+    if not isinstance(dataset_profiles, dict):
+        raise ValueError(f"lbi_profiles.{dataset} must be a mapping")
+    key = budget_key(budget)
+    record = dataset_profiles.get(key, dataset_profiles.get("default"))
+    if not isinstance(record, dict) or set(record) != {"status", "parameters"}:
+        raise ValueError(f"Missing or malformed LBI profile for {dataset}/{key}")
+    parameters = copy.deepcopy(record["parameters"])
+    parameters.update(overrides or {})
+    status = str(record["status"])
+    effective_status = status if not overrides else "override_nonformal"
+    if effective_status != "frozen" and not allow_provisional:
+        raise ValueError(
+            "COME Group-LBI formal run is blocked: the dataset/budget tuple "
+            f"{dataset}/{key} has status {effective_status!r}; pass allow_provisional only "
+            "for implementation, search or smoke execution"
+        )
+    return {
+        "status": effective_status,
+        "source_profile_status": status,
+        "formal_eligible": effective_status == "frozen",
+        "profile_key": f"{dataset}/{key}",
+        **validate_lbi_profile(parameters),
+    }
 
 
 def validate_raw_config(config: dict[str, Any]) -> None:
@@ -324,6 +471,10 @@ def validate_raw_config(config: dict[str, Any]) -> None:
         "come",
         "runtime",
         "output",
+        "stage2_optimization",
+        "checkpointing",
+        "diagnostics",
+        "lbi_profiles",
     }
     if set(config) != expected_top_level_keys:
         raise ValueError(
@@ -357,6 +508,28 @@ def validate_raw_config(config: dict[str, Any]) -> None:
         raise ValueError(f"come must be exactly {EXPECTED_COME_BLOCK}")
     if config.get("runtime") != EXPECTED_RUNTIME:
         raise ValueError(f"runtime must be exactly {EXPECTED_RUNTIME}")
+    if config.get("stage2_optimization") != EXPECTED_STAGE2_OPTIMIZATION:
+        raise ValueError("stage2_optimization differs from the frozen protocol")
+    if config.get("checkpointing") != EXPECTED_CHECKPOINTING:
+        raise ValueError("checkpointing differs from the frozen protocol")
+    if config.get("diagnostics") != EXPECTED_DIAGNOSTICS:
+        raise ValueError("diagnostics differs from the frozen protocol")
+    if set(config.get("lbi_profiles", {})) != {"office31", "visda-c"}:
+        raise ValueError("lbi_profiles must contain exactly office31 and visda-c")
+    for dataset in ("office31", "visda-c"):
+        dataset_profiles = config["lbi_profiles"].get(dataset)
+        expected_profile_keys = {budget_key(value) for value in FORMAL_BUDGETS}
+        if (
+            not isinstance(dataset_profiles, dict)
+            or set(dataset_profiles) != expected_profile_keys
+        ):
+            raise ValueError(
+                f"lbi_profiles.{dataset} must contain exactly {sorted(expected_profile_keys)}"
+            )
+        for budget in FORMAL_BUDGETS:
+            resolve_lbi_profile(
+                config, dataset, budget, allow_provisional=True
+            )
     output = config.get("output")
     if not isinstance(output, dict) or set(output) != {"root", "variant_dir_prefix"}:
         raise ValueError("COME output config must contain only root and variant_dir_prefix")
@@ -374,11 +547,10 @@ def variant_output_root(raw_config: dict[str, Any], variant: str) -> str:
 def variant_config_view(raw_config: dict[str, Any], variant: str) -> dict[str, Any]:
     """Rebuild the per-variant config block set from the shared YAML.
 
-    The result is exactly the config a variant used to own: the shared blocks
-    verbatim, plus the derived protocol revision, update scope, structural-group
-    selection policy and artifact root.  Everything downstream - validation,
-    transfer resolution and the SHOT substrate identity test - works on this
-    view, so the resolved config of every condition is unchanged.
+    The result contains the shared blocks verbatim plus the derived protocol
+    revision, update scope, structural-group selection policy and artifact
+    root.  Everything downstream works on this view, and the identity test
+    permits only the protocol-v2 COME differences from SHOT.
     """
 
     require_supported_variant(variant)
@@ -398,6 +570,13 @@ def variant_config_view(raw_config: dict[str, Any], variant: str) -> dict[str, A
     view["come"] = copy.deepcopy(raw_config["come"])
     view["runtime"] = copy.deepcopy(raw_config["runtime"])
     view["output"] = {"root": variant_output_root(raw_config, variant)}
+    if variant == GROUP_LBI:
+        view["stage2_optimization"] = copy.deepcopy(
+            raw_config["stage2_optimization"]
+        )
+        view["checkpointing"] = copy.deepcopy(raw_config["checkpointing"])
+        view["diagnostics"] = copy.deepcopy(raw_config["diagnostics"])
+        view["lbi_profiles"] = copy.deepcopy(raw_config["lbi_profiles"])
     return view
 
 
@@ -443,6 +622,13 @@ def validate_variant_config(config: dict[str, Any], *, variant: str) -> None:
             raise ValueError(f"selection must be exactly {SELECTION_BLOCKS[variant]}")
     elif "selection" in config:
         raise ValueError("dense COME variants must not carry a selection block")
+    if variant == GROUP_LBI:
+        if config.get("stage2_optimization") != EXPECTED_STAGE2_OPTIMIZATION:
+            raise ValueError("Group-LBI Stage-2 optimizer differs from protocol")
+        if config.get("checkpointing") != EXPECTED_CHECKPOINTING:
+            raise ValueError("Group-LBI checkpoint policy differs from protocol")
+        if config.get("diagnostics") != EXPECTED_DIAGNOSTICS:
+            raise ValueError("Group-LBI diagnostics differ from protocol")
 
 
 def _resolve_substrate(
@@ -512,7 +698,7 @@ def _resolve_substrate(
     return {
         "schema_version": 1,
         "protocol_revision": PROTOCOL_REVISIONS[variant],
-        "protocol_document": PROTOCOL_DOCUMENT,
+        "protocol_document": PROTOCOL_DOCUMENTS[variant],
         "implementation_revision": IMPLEMENTATION_REVISIONS[variant],
         "formal_seed": FORMAL_SEED,
         "method": "come",
@@ -574,6 +760,9 @@ def resolve_transfer_config(
     budget: float | str | None = None,
     device: str,
     output_dir: str | os.PathLike[str],
+    lbi_overrides: dict[str, Any] | None = None,
+    allow_provisional_lbi: bool = False,
+    stream_checkpoint: bool | None = None,
 ) -> dict[str, Any]:
     """Resolve one formal condition and fail closed on every frozen field.
 
@@ -583,6 +772,8 @@ def resolve_transfer_config(
     """
 
     require_supported_variant(variant)
+    if variant != GROUP_LBI and (lbi_overrides or allow_provisional_lbi):
+        raise ValueError("LBI overrides apply only to variant=group_lbi")
     validate_raw_config(raw_config)
     view = variant_config_view(raw_config, variant)
     validate_variant_config(view, variant=variant)
@@ -592,6 +783,17 @@ def resolve_transfer_config(
             raise ValueError("dense COME variants reject structural-group budgets")
     elif budget is None:
         raise ValueError("sparse COME variants require an explicit rho budget")
+
+    normalized = None if variant in DENSE_VARIANTS else normalize_budget(budget)
+    lbi_profile = None
+    if variant == GROUP_LBI:
+        lbi_profile = resolve_lbi_profile(
+            raw_config,
+            dataset,
+            normalized,
+            overrides=lbi_overrides,
+            allow_provisional=allow_provisional_lbi,
+        )
 
     resolved = _resolve_substrate(
         view,
@@ -606,7 +808,6 @@ def resolve_transfer_config(
     if variant in DENSE_VARIANTS:
         return finalize_identity(resolved, variant=variant)
 
-    normalized = normalize_budget(budget)
     group_count = budget_group_count(normalized)
     scalars_key = (
         "active_candidate_scalars_per_step"
@@ -619,6 +820,25 @@ def resolve_transfer_config(
         "requested_group_count": group_count,
         scalars_key: group_count * GROUP_SIZE,
     }
+    if variant == GROUP_LBI:
+        resolved["selection"].pop("active_candidate_scalars", None)
+        resolved["selection"]["maximum_active_candidate_scalars"] = (
+            group_count * GROUP_SIZE
+        )
+        resolved["lbi"] = lbi_profile
+        resolved["stage2_optimization"] = copy.deepcopy(
+            view["stage2_optimization"]
+        )
+        checkpoint_enabled = (
+            view["checkpointing"]["enabled_by_default"]
+            if stream_checkpoint is None
+            else bool(stream_checkpoint)
+        )
+        resolved["checkpointing"] = {
+            **copy.deepcopy(view["checkpointing"]),
+            "enabled": checkpoint_enabled,
+        }
+        resolved["diagnostics"] = copy.deepcopy(view["diagnostics"])
     return finalize_identity(
         resolved, variant=variant, tag=budget_tag(normalized)
     )
@@ -668,6 +888,8 @@ __all__ = [
     "FULL_DENSE",
     "FULL_DENSE_ADAPTATION",
     "GROUP_MAGNITUDE",
+    "GROUP_LBI",
+    "GROUP_LBI_PROTOCOL_DOCUMENT",
     "GROUP_RANDOM",
     "GROUP_SALIENCY",
     "GROUP_SIZE",
@@ -678,6 +900,7 @@ __all__ = [
     "NUM_RANDOM_MASKS",
     "PROTOCOL_DOCUMENT",
     "PROTOCOL_REVISIONS",
+    "PROTOCOL_DOCUMENTS",
     "RUN_PREFIXES",
     "SELECTION_BLOCKS",
     "SPARSE_LBI_IMPLEMENTATION_REVISION",
@@ -693,14 +916,17 @@ __all__ = [
     "come_objective_payload",
     "finalize_identity",
     "load_config",
+    "lbi_cli_overrides",
     "normalize_budget",
     "parse_budgets",
     "parse_variants",
     "require_supported_variant",
     "resolve_transfer_config",
+    "resolve_lbi_profile",
     "select_transfers",
     "validate_raw_config",
     "validate_variant_config",
+    "validate_lbi_profile",
     "variant_config_view",
     "variant_output_root",
 ]

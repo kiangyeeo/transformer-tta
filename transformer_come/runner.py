@@ -75,6 +75,7 @@ from .config import (
     DENSE_VARIANTS,
     GROUP_RANDOM,
     GROUP_SALIENCY,
+    GROUP_LBI,
     IMPLEMENTATION_REVISIONS,
     MASK_SEEDS,
     NUM_RANDOM_MASKS,
@@ -1538,8 +1539,9 @@ def run_transfer(
     show_progress: bool = True,
     model_loader=None,
     child_runner=None,
+    resume: bool = False,
 ) -> dict:
-    """Run exactly one protocol-aligned COME condition of any non-LBI variant.
+    """Run exactly one protocol-aligned COME condition.
 
     The variant comes from the resolved config, so a condition cannot be run
     under a scope, support policy or stream other than the one its scientific
@@ -1549,6 +1551,20 @@ def run_transfer(
     variant = require_supported_variant(config["variant"])
     if child_runner is not None and variant != GROUP_RANDOM:
         raise ValueError("child_runner applies only to group_random")
+
+    if variant == GROUP_LBI:
+        from .lbi_runner import run_transfer as run_lbi_transfer
+
+        return run_lbi_transfer(
+            config,
+            project_root,
+            show_progress=show_progress,
+            resume=resume,
+            model_loader=model_loader or MODEL_LOADERS[GROUP_LBI],
+        )
+
+    if resume:
+        raise ValueError("Only COME group_lbi supports stream resume")
 
     if variant == GROUP_RANDOM:
         if model_loader is not None:

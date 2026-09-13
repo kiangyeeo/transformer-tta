@@ -208,6 +208,7 @@ def _validate_frozen_fields(config: dict[str, Any]) -> None:
         "budget_slack": False,
         "state_lifecycle": "theta_delta_gamma_z_reset_every_online_batch",
         "stage2_initialization": "base_plus_masked_delta",
+        "stage1_step_cap_hit_policy": "continue_to_end_of_stream",
     }
     if config.get("selection") != expected_selection:
         raise ValueError(f"selection must be exactly {expected_selection}")

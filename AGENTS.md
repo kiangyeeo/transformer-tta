@@ -1095,9 +1095,10 @@ support instantly explodes
 very poor utilization
 ```
 
-If any online batch reaches exactly 3000 Stage-1 steps, terminate that LBI run
-immediately, record `valid_lbi_run=false`, `result_validity=invalid`, and
-`invalid_reason=stage1_3000_step_hit`, and do not process later batches or FO.
+The 3000-step value is a batch-local Stage-1 cap, not an outer-stream stop.
+If any online batch reaches exactly 3000 Stage-1 steps, retain the cap-hit
+diagnostic, finish that batch normally, and continue through every later batch
+and the complete FO pass. A cap hit alone does not invalidate the LBI run.
 
 ### Phase B — persistent/refinement interaction
 

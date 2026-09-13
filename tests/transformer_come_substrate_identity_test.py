@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Contract A/B: COME differs from SHOT only in the host objective.
+"""Contract A/B: COME differs from SHOT in its objective and frozen host LR.
 
-Every substrate block of every COME config must equal its SHOT counterpart,
-and the candidate universe, the group definition, the integer budget and the
-strict masked optimizer must be the *same code objects* as the SHOT ones, not
-merely numerically similar.
+All other substrate fields must equal their SHOT counterparts.  The candidate
+universe, group definition, integer budget and strict masked optimizer must be
+the *same code objects* as the SHOT ones, not merely numerically similar.
 """
 
 from __future__ import annotations
@@ -41,6 +40,8 @@ from transformer_come.config import (  # noqa: E402
     EXPECTED_COME_BLOCK,
     IMPLEMENTATION_REVISIONS,
     NON_SCIENTIFIC_KEYS,
+    PROTOCOL_DOCUMENT,
+    GROUP_LBI_PROTOCOL_DOCUMENT,
     PROTOCOL_REVISIONS,
     SPARSE_LBI_IMPLEMENTATION_REVISION,
     finalize_identity,
@@ -48,6 +49,7 @@ from transformer_come.config import (  # noqa: E402
     validate_raw_config,
     validate_variant_config,
     variant_config_view,
+    resolve_lbi_profile,
 )
 
 
@@ -102,6 +104,19 @@ def check_configs_match_shot() -> dict:
             come_rest.pop(key)
         shot_rest.pop("loss")
         come_rest.pop("come")
+        shot_optimization = shot_rest.pop("optimization")
+        come_optimization = come_rest.pop("optimization")
+        assert shot_optimization == {
+            "optimizer": "adamw",
+            "lr": 1.0e-5,
+            "betas": [0.9, 0.999],
+            "eps": 1.0e-8,
+            "weight_decay": 0.01,
+        }
+        assert come_optimization == {
+            **shot_optimization,
+            "lr": 1.0e-7,
+        }
         allowed = ALLOWED_SELECTION_DIFFERENCES.get(variant, {})
         for field, (shot_value, come_value) in allowed.items():
             assert shot_rest["selection"][field] == shot_value
@@ -112,6 +127,8 @@ def check_configs_match_shot() -> dict:
         report[variant] = {
             "shared_top_level_keys": sorted(come_rest),
             "allowed_selection_differences": sorted(allowed),
+            "shot_lr": shot_optimization["lr"],
+            "come_lr": come_optimization["lr"],
         }
     return {"config_substrate_identity": report}
 
@@ -192,12 +209,12 @@ def check_candidate_and_group_universe() -> dict:
     }
 
 
-def check_optimizer_settings_match() -> None:
+def check_revised_optimizer_settings() -> None:
     for variant in VARIANTS:
         come = variant_config_view(_load(COME_CONFIG), variant)
         assert come["optimization"] == {
             "optimizer": "adamw",
-            "lr": 1.0e-5,
+            "lr": 1.0e-7,
             "betas": [0.9, 0.999],
             "eps": 1.0e-8,
             "weight_decay": 0.01,
@@ -213,7 +230,11 @@ def check_optimizer_settings_match() -> None:
 
 
 def check_revisions_are_independent() -> None:
-    assert len(set(PROTOCOL_REVISIONS.values())) == len(VARIANTS)
+    assert PROTOCOL_DOCUMENT.endswith("20260911_v2.md")
+    assert (PROJECT_ROOT / PROTOCOL_DOCUMENT).is_file()
+    assert len(set(PROTOCOL_REVISIONS.values())) == len(PROTOCOL_REVISIONS)
+    assert GROUP_LBI_PROTOCOL_DOCUMENT.endswith("20260913_v1.md")
+    assert (PROJECT_ROOT / GROUP_LBI_PROTOCOL_DOCUMENT).is_file()
     for variant, revision in PROTOCOL_REVISIONS.items():
         assert revision.startswith("come_transformer_")
         assert "shot" not in revision
@@ -282,7 +303,7 @@ def check_validators_fail_closed() -> dict:
         lambda item: item["come"].update({"renormalize_after_epsilon": True}),
         lambda item: item["come"].update({"norm_epsilon": 1.0e-6}),
         lambda item: item["come"].update({"opinion_implementation": "direct_exp"}),
-        lambda item: item["optimization"].update({"lr": 1.0e-4}),
+        lambda item: item["optimization"].update({"lr": 1.0e-5}),
         lambda item: item["data"]["preprocessing"].update({"interpolation": "bicubic"}),
         lambda item: item["adaptation"].update({"model_mode": "train"}),
     ):
@@ -316,7 +337,7 @@ def check_validators_fail_closed() -> dict:
         lambda item: item.update({"selection": {"integer_rule": "ceil"}}),
         lambda item: item.update({"protocol_document": "some_other_protocol_v9"}),
         lambda item: item["come"].update({"tau": 0.5}),
-        lambda item: item["optimization"].update({"lr": 1.0e-4}),
+        lambda item: item["optimization"].update({"lr": 1.0e-5}),
         lambda item: item["data"]["preprocessing"].update({"interpolation": "bicubic"}),
         lambda item: item["runtime"].update({"amp": True}),
     ):
@@ -329,18 +350,23 @@ def check_validators_fail_closed() -> dict:
         else:
             raise AssertionError("A frozen shared-config mutation was accepted")
 
-    # group_lbi must fail closed with no dense fallback.
-    for call in (
-        lambda: variant_config_view(raw, "group_lbi"),
-        lambda: come_config.require_supported_variant("group_lbi"),
-    ):
-        try:
-            call()
-        except ValueError as error:
-            assert "group_lbi" in str(error)
-            rejected += 1
-        else:
-            raise AssertionError("group_lbi was accepted")
+    # Group-LBI is implemented, while provisional tuples remain formally
+    # blocked and cannot fall back to a dense identity.
+    lbi_view = variant_config_view(raw, "group_lbi")
+    validate_variant_config(lbi_view, variant="group_lbi")
+    assert come_config.require_supported_variant("group_lbi") == "group_lbi"
+    assert lbi_view["selection"]["type"] == "group_split_lbi"
+    try:
+        resolve_lbi_profile(raw, "office31", 0.0005)
+    except ValueError as error:
+        assert "formal run is blocked" in str(error)
+        rejected += 1
+    else:
+        raise AssertionError("A provisional Group-LBI tuple passed the formal gate")
+    provisional = resolve_lbi_profile(
+        raw, "office31", 0.0005, allow_provisional=True
+    )
+    assert provisional["formal_eligible"] is False
     return {"rejected_frozen_field_mutations": rejected}
 
 
@@ -348,7 +374,7 @@ def main() -> int:
     report = {"status": "PASS"}
     report.update(check_configs_match_shot())
     report.update(check_candidate_and_group_universe())
-    check_optimizer_settings_match()
+    check_revised_optimizer_settings()
     check_revisions_are_independent()
     report.update(check_scientific_identity_changes_with_objective())
     report.update(check_validators_fail_closed())
