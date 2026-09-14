@@ -83,9 +83,9 @@ class Task:
     log_path: str
 
 
-def build_tasks(output_root: Path) -> list[Task]:
+def build_tasks(output_root: Path, dataset_order=DATASET_ORDER) -> list[Task]:
     tasks: list[Task] = []
-    for dataset in DATASET_ORDER:
+    for dataset in dataset_order:
         for budget in BUDGETS:
             for alpha in ALPHAS:
                 for nu in NUS:
@@ -138,7 +138,9 @@ def summary_state(task: Task) -> str | None:
     return "completed_valid"
 
 
-def command_for(task: Task, config_path: Path) -> tuple[list[str], bool]:
+def command_for(
+    task: Task, config_path: Path, *, omega: float, stage2_lr: float
+) -> tuple[list[str], bool]:
     output_dir = Path(task.output_dir)
     checkpoint = output_dir / ".stream_checkpoint" / "state.pt"
     if checkpoint.is_file():
@@ -190,9 +192,9 @@ def command_for(task: Task, config_path: Path) -> tuple[list[str], bool]:
             "--lbi-nu",
             str(task.nu),
             "--lbi-omega",
-            "0.20",
+            str(omega),
             "--lbi-stage2-lr",
-            "1e-5",
+            str(stage2_lr),
             "--no-progress",
         ],
         False,
@@ -209,7 +211,10 @@ def status_payload(
         "started_at_utc": started,
         "updated_at_utc": utc_now(),
         "task_count": len(tasks),
-        "dataset_budget_configuration_count": 6 * 18,
+        "dataset_budget_configuration_count": len(
+            {(task.dataset, task.budget) for task in tasks}
+        )
+        * 18,
         "transfer_run_count": len(tasks),
         "completed_valid": sum(state == "completed_valid" for state in states),
         "completed_invalid": sum(state == "completed_invalid" for state in states),
@@ -231,6 +236,19 @@ def main(argv=None) -> int:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--gpus", default="0,1,2")
+    parser.add_argument(
+        "--datasets",
+        choices=("all", "visda-c", "office31"),
+        default="all",
+        help="dataset queue to run; default is the full VisDA-C then Office-31 sweep",
+    )
+    parser.add_argument("--omega", type=float, default=0.20)
+    parser.add_argument("--stage2-lr", type=float, default=1.0e-5)
+    parser.add_argument(
+        "--no-phase-barrier",
+        action="store_true",
+        help="let an idle GPU start the next dataset/budget phase immediately",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -241,28 +259,33 @@ def main(argv=None) -> int:
         raise FileNotFoundError("COME config or lbi Python interpreter is missing")
 
     output_root = args.output_root.resolve()
-    tasks = build_tasks(output_root)
+    selected_datasets = (
+        DATASET_ORDER if args.datasets == "all" else (args.datasets,)
+    )
+    tasks = build_tasks(output_root, selected_datasets)
     plan = {
         "schema_version": 1,
         "method": "come",
         "variant": "group_lbi",
         "phase": "stage1_screen",
         "queue_order": [
-            "visda-c/rho-0.002",
-            "visda-c/rho-0.001",
-            "visda-c/rho-0.0005",
-            "office31/rho-0.002",
-            "office31/rho-0.001",
-            "office31/rho-0.0005",
+            f"{dataset}/rho-{number(budget)}"
+            for dataset in selected_datasets
+            for budget in BUDGETS
         ],
+        "datasets": list(selected_datasets),
         "alpha": list(ALPHAS),
         "kappa": 1.0,
         "nu": list(NUS),
-        "omega": 0.20,
-        "stage2_lr": 1.0e-5,
+        "omega": args.omega,
+        "stage2_lr": args.stage2_lr,
         "stage2_steps": 1,
         "stage1_max_steps": 3000,
-        "dataset_budget_configuration_count": 6 * 18,
+        "phase_barrier": not args.no_phase_barrier,
+        "dataset_budget_configuration_count": len(
+            {(task.dataset, task.budget) for task in tasks}
+        )
+        * 18,
         "transfer_run_count": len(tasks),
         "gpus": gpus,
         "config": str(args.config.resolve()),
@@ -301,8 +324,8 @@ def main(argv=None) -> int:
     )
 
     while pending or active:
-        # A dataset-budget phase is a strict scheduling barrier: faster GPUs do
-        # not enter the next budget/dataset while any run from this phase lives.
+        # By default a dataset-budget phase is a strict scheduling barrier.
+        # Screening sweeps may opt into work-conserving cross-phase scheduling.
         current_phase = (
             (next(iter(active.values()))["task"].dataset,
              next(iter(active.values()))["task"].budget)
@@ -312,12 +335,20 @@ def main(argv=None) -> int:
         while (
             pending
             and available
-            and (pending[0].dataset, pending[0].budget) == current_phase
+            and (
+                args.no_phase_barrier
+                or (pending[0].dataset, pending[0].budget) == current_phase
+            )
         ):
             task = pending.pop(0)
             gpu = available.pop(0)
             try:
-                command, resumed = command_for(task, args.config.resolve())
+                command, resumed = command_for(
+                    task,
+                    args.config.resolve(),
+                    omega=args.omega,
+                    stage2_lr=args.stage2_lr,
+                )
             except RuntimeError as error:
                 failures.append(
                     {"queue_index": task.queue_index, "error": str(error), **asdict(task)}
